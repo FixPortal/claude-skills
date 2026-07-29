@@ -1,10 +1,6 @@
 {
   "stryker-config": {
-    "solution": "YourSolution.sln",
-    "project": "src/Your.Project/Your.Project.csproj",
-    "test-projects": [
-      "tests/Your.Project.Tests/Your.Project.Tests.csproj"
-    ],
+    "project": "Your.Project.csproj",
     "reporters": [
       "progress",
       "html",
@@ -12,7 +8,7 @@
     ],
     "report-file-name": "mutation-report",
     "mutation-level": "Standard",
-    "coverage-analysis": "off",
+    "coverage-analysis": "perTest",
     "test-runner": "mtp",
     "concurrency": 4,
     "thresholds": {
@@ -20,7 +16,6 @@
       "low": 70,
       "break": 0
     },
-    "test-case-filter": "Category!=Integration",
     "mutate": [
       "**/*.cs"
     ]
