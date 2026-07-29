@@ -37,7 +37,8 @@ Adapt the project/path/solution names to the target repo. Confirm the mainline b
 **Greenfield vs normalize.** If the repo already has workflows, reconcile against them
 (rename/align, don't blind-overwrite) rather than scaffolding fresh. Before wiring frontend
 steps, confirm the UI's `package.json` actually defines `lint` / `test` / `build` scripts;
-before defaulting Stryker to `mtp`, confirm the test project really runs on MTP (see below).
+before choosing a Stryker `test-runner`, note that a `test-case-filter` will not work under
+`mtp` — scoping comes from the working directory instead (see below).
 
 ## Non-negotiable house rules for `ci.yml`
 
@@ -295,13 +296,17 @@ jobs:
         run: dotnet restore YourSolution.sln
       - name: Restore local tools
         run: dotnet tool restore
+      # working-directory is load-bearing: from the repo root Stryker runs EVERY test project
+      # that references the project under test. See "Keeping slow tests out of the mutation
+      # lane" below. StrykerOutput lands beside the test project, hence the paths that follow.
       - name: Run Stryker
-        run: dotnet stryker --config-file stryker-config.json
+        working-directory: tests/Your.Project.Tests
+        run: dotnet stryker --config-file ../../stryker-config.json
       - name: Summarize mutation report
         if: always()
         shell: pwsh
         run: |
-          $latest = Get-ChildItem StrykerOutput -Directory | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          $latest = Get-ChildItem tests/Your.Project.Tests/StrykerOutput -Directory | Sort-Object LastWriteTime -Descending | Select-Object -First 1
           if (-not $latest) { throw "No StrykerOutput directory found." }
           $report = Join-Path $latest.FullName 'reports/mutation-report.json'
           $jsonSummary = Join-Path $latest.FullName 'reports/mutation-summary.json'
@@ -312,13 +317,13 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: mutation-summary
-          path: StrykerOutput/**/reports/mutation-summary.*
+          path: tests/Your.Project.Tests/StrykerOutput/**/reports/mutation-summary.*
       - name: Upload mutation report
         if: always()
         uses: actions/upload-artifact@v7
         with:
           name: mutation-report
-          path: StrykerOutput/**
+          path: tests/Your.Project.Tests/StrykerOutput/**
           if-no-files-found: error
 ```
 
@@ -328,11 +333,67 @@ jobs:
   than overwriting. `scaffold-dotnet` owns the CSharpier version and repository config;
   this skill consumes it for CI.
 - `stryker-config.json` (repo root) — house defaults: `test-runner: mtp`,
-  `mutation-level: Standard`, `coverage-analysis: off`, `concurrency: 4`,
-  `thresholds: { high: 80, low: 70, break: 0 }` (break 0 = never fail the run),
-  `test-case-filter: Category!=Integration`. Set `solution`/`project`/`test-projects` to the
-  real paths.
+  `mutation-level: Standard`, `concurrency: 4`, `coverage-analysis: perTest` (Stryker's own
+  default), `thresholds: { high: 80, low: 70, break: 0 }` (break 0 = never fail the run).
+  Set `project` to the project under test. Deliberately **no** `solution`, **no**
+  `test-projects` and **no** `test-case-filter` — see the section below; scoping comes from
+  the working directory, not from those keys.
+  `coverage-analysis: perTest` is right *once the lane is unit-only*, and actively harmful
+  before that: it runs the tests that COVER each mutant, so with integration tests in the
+  lane it selects exactly the expensive ones. Measured on one API repo: ~39s per mutant with
+  a mixed lane, ~0.4s with a unit-only lane. Fix the lane, then this setting does what it is
+  meant to.
 - `scripts/summarize-stryker.ps1` — shipped verbatim; renders the run into a step summary.
+
+### Keeping slow tests out of the mutation lane: structure, not filters
+
+**Do not rely on `test-case-filter`, and do not rely on `test-projects`.** Neither does what
+it appears to. The house pattern is: a unit-only test project, and Stryker invoked from that
+project's directory (see the `working-directory` line in the skeleton above). `StrykerOutput/`
+then lands beside the test project — update the summary step, both artifact paths, and
+`.gitignore` accordingly.
+
+Two mechanisms fail silently here, and each cost about a week:
+
+**`test-projects` does not restrict execution.** From the repository root, Stryker discovers
+every test project referencing the project under test and runs all of them against every
+mutant, whatever the config says. Only the working directory scopes it. Measured on one repo:
+246 tests vs 133 on the same config; >55 min vs ~40 seconds.
+
+**`test-case-filter` is silently ignored under `test-runner: mtp`.** In Stryker's own source
+(4.16.0), `TestCaseFilter` appears only under `src/Stryker.TestRunner.VsTest/**`; the MTP
+runner project, `src/Stryker.TestRunner.MicrosoftTestPlatform/`, has no reference to it.
+Stryker emits no warning — the config parses, the run proceeds, and the filter does nothing.
+A repo sits at an acceptable runtime for months, then one feature adds a dozen
+`WebApplicationFactory` tests and the nightly falls off a cliff — and the symptom points at
+mutant count, not at a setting that never worked.
+
+**Do not "fix" this by switching to `vstest`.** It honours the filter and produces **invalid
+results**: against xunit.v3 built as an MTP executable, Stryker's VSTest runner executes tests
+but never attributes a failure to a mutant. Measured: **0 of 19** mutants killed on a class
+with dedicated unit tests, and on a larger set `Killed: 0, Survived: 224, Timeout: 194` with a
+plausible "46.41%" score that was purely timeouts (Stryker scores a timeout as a kill).
+Coverage capture fails under the same runner. **Always sanity-check `Killed:` is non-zero on
+code you know is tested** — a config that runs fast and prints a number is not the same as one
+that works.
+
+**How to check a repo in one line.** Stryker's initial test run prints the count it will use:
+
+```text
+[INF] Number of tests found: 133 for project .../Your.Project.csproj. Initial test run started.
+```
+
+Compare it against `dotnet test --filter "Category!=Integration"`. Equal means the scoping
+works; the full-suite number means it does not. Check this first whenever a mutation run's
+runtime jumps.
+
+**And consider whether the whole project should be mutated at all.** Mutating everything is
+the default, not a decision. A surviving mutant in DI wiring, a read-only endpoint or a
+string builder does not change an engineering decision; one in currency conversion,
+idempotency keys or an auth filter does. Scoping `mutate` to those surfaces took one repo
+from 1529 mutants (>55 min, timing out) to 418 (~20 min) while making the score mean more,
+not less. Expect the score to *drop* when you do this — uncovered scoped mutants report
+`NoCoverage` — and read that as information about the unit suite, not as a regression.
 
 **`mtp` prerequisite:** `test-runner: mtp` (Microsoft.Testing.Platform) requires the test
 project to build as an MTP executable. For **xunit.v3** the house mechanism is
@@ -541,6 +602,11 @@ if explicitly asked:
 | Job/step `continue-on-error` to keep score informational | Remove it and use `break: 0`; execution/report failures must be red. |
 | Missing report only warns | Make the summary throw and set report upload `if-no-files-found: error`. |
 | Copying another repo's mutation cron | Stagger nightly UTC slots across the estate. |
+| `dotnet stryker` run from the repo root | It then runs EVERY test project referencing the target. Set `working-directory` to the unit test project. |
+| `test-runner: mtp` alongside a `test-case-filter` | The filter is silently ignored under MTP. Split the slow tests into a project Stryker does not run, not a filter. Verify with "Number of tests found". |
+| Assuming `coverage-analysis: perTest` is faster | It selects the tests that COVER each mutant. Where those are the slow integration tests it is far slower. Measure per repo. |
+| Mutating a whole project because it is the default | Scope `mutate` to surfaces where a surviving mutant would change a decision (money, auth, persistence). Wiring and read endpoints buy nothing. |
+| Diagnosing a slow mutation run from mutant count alone | Read "Number of tests found" first — tests-per-mutant is the other multiplier, and the one that fails silently. Multiply by a MEASURED per-mutant cost before concluding. |
 | npm dependabot `directory: /` | Point at the actual package.json folder. |
 | Committing a `codeql.yml` | Enable default setup via the Security tab / `gh api`. |
 | PR base `branches: [main]` when mainline differs | Check `git symbolic-ref refs/remotes/origin/HEAD`. |
