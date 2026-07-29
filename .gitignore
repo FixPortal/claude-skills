@@ -7,3 +7,7 @@ Thumbs.db
 # Knowledge-graph tool output (graphify / understand-anything)
 graphify-out/
 .understand-anything/
+
+# Keep Claude local state out while allowing the committed review policy.
+.claude/*
+!.claude/review-policy.json
