@@ -38,5 +38,8 @@ jobs:
               Write-Host "Running $($_.FullName)"
               & $_.FullName
             }
+          # Some negative-path verifiers intentionally run a failing child process and
+          # assert its exit code. Their assertions pass, but the native status persists.
+          $global:LASTEXITCODE = 0
           # verify-collect.ps1 is an estate integration skeleton with intentional
           # <repos-root> placeholders; it cannot run in this standalone public repo.
