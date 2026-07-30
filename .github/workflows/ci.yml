@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+jobs:
+  skills:
+    name: Skill validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Lint workflows
+        uses: raven-actions/actionlint@3d39aea434753780c3b3d4a1a31c854b4dbf49d7 # v2
+        with:
+          shellcheck: true
+
+      - name: Run skill verification scripts
+        shell: pwsh
+        run: |
+          Get-ChildItem skills -Recurse -Filter 'verify-*.ps1' |
+            Where-Object Name -ne 'verify-collect.ps1' |
+            Sort-Object FullName |
+            ForEach-Object {
+              Write-Host "Running $($_.FullName)"
+              & $_.FullName
+            }
+          # verify-collect.ps1 is an estate integration skeleton with intentional
+          # <repos-root> placeholders; it cannot run in this standalone public repo.
