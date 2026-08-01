@@ -115,27 +115,85 @@ a fake/fixed clock in the test rather than reading `DateTime.UtcNow` / `SystemCl
 
 Tests that exercise async or concurrent behaviour (a fill landing, a race
 resolving, a pipeline disposing, a message arriving) must be **event-driven**.
-Await a real completion signal or poll a condition with a generous timeout —
-never `Thread.Sleep`/`Task.Delay` "long enough" and then assert immediately,
-and never assert a duration is `BeLessThan(tightThreshold)`.
 
-A fixed sleep races the system under test: locally the machine is idle so it
-passes, but on a contended CI runner the work either hasn't finished (the
-assertion sees an empty or short collection) or an extra emission slips in (it
-sees too many), or a tight duration ceiling is exceeded. The result is a test
-that is green locally and flaky in CI — a structural defect, not bad luck.
-Re-running masks it; converting it to event-driven fixes it.
+**No wall-clock value inside a test body may decide whether it passes.** Not as
+a sleep, not as a ceiling, not as a "generous" bound. This is a prohibition, not
+a preference — a duration in the body measures how busy the runner was, so it
+turns load into failure. Specifically banned:
+
+| Banned in a test body | Why it fails |
+|---|---|
+| `Thread.Sleep(n)` / `await Task.Delay(n)` then assert | Races the system under test |
+| `elapsed.Should().BeLessThan(...)`, `Stopwatch` ceilings | Measures the scheduler |
+| `signal.Wait(TimeSpan)` / `.WaitAsync(TimeSpan)` asserted true | A slow runner is not a defect |
+| `Task.WhenAny(work, Task.Delay(n))` as a hang detector | Same bound, moved |
+| `while (!cond && DateTime.UtcNow < deadline)` poll loops | The deadline is the flake |
+
+The trap is that the last three *look* event-driven. They await real signals —
+and then impose a private deadline on how long the signal may take, which is the
+same defect wearing a better coat. A 2-second bound on "has the dispatcher
+started yet" is not generous; it is a bet on the scheduler, and under full-suite
+parallelism it loses.
+
+**Where the ceiling belongs: on the framework.** A test that awaits an unbounded
+signal still must not wedge the suite when the code genuinely regresses. Put
+that ceiling on the test, far above any healthy run and with no diagnostic
+meaning in between:
 
 ```csharp
-// Preferred: gate the assertion on an awaited signal / polled condition
-await WaitForAsync(() => sink.Fills.Count == 1, timeout: TimeSpan.FromSeconds(5));
-sink.Fills.Should().ContainSingle();
+private const int HangCeilingMs = 30_000;
 
-// Avoid: sleep-then-assert (races the runner) and tight duration ceilings
-await Task.Delay(200);
-sink.Fills.Should().ContainSingle();
-elapsed.Should().BeLessThan(TimeSpan.FromMilliseconds(50));
+[Fact(Timeout = HangCeilingMs)]
+public async Task Shutdown_returns_while_an_uncancellable_send_is_still_in_flight()
+{
+    // Await a real signal, bounded ONLY by the test's cancellation token.
+    await sender.Entered.WaitAsync(TestContext.Current.CancellationToken);
+
+    var shutdown = RunOnDedicatedThread(() => sink.Dispose());
+    await shutdown.WaitAsync(TestContext.Current.CancellationToken);
+
+    // The assertion is a state fact, not a duration.
+    sender.CompletedSends.Should().Be(0, "shutdown did not wait for the blocked send");
+}
+
+// Polling is fine when nothing signals — but with NO deadline of its own.
+private static async Task WaitUntilAsync(Func<bool> condition)
+{
+    while (!condition())
+    {
+        await Task.Delay(10, TestContext.Current.CancellationToken);
+    }
+}
 ```
+
+Verify the ceiling actually fires before relying on it: a throwaway
+`[Fact(Timeout = 1_000)]` that awaits forever must report *"Test execution timed
+out"*, not hang the run.
+
+**Assert a state fact, never a duration.** "Did teardown return?" is answered by
+awaiting the task, not by timing it. "Did the fill land?" is answered by the
+collection's contents. If the only way to express an invariant seems to be a
+duration, the invariant is usually "X happened while Y was still in flight" —
+express that as a counter or flag the system already exposes.
+
+**The one exception: a bound that can only degrade the test, never fail it.** A
+best-effort barrier — "wait for all eight workers to start, and proceed anyway if
+the scheduler is starved" — is allowed, because nothing is asserted on how it
+resolves: missing it makes the test less thorough, not red. Say so in a comment,
+or the next reader will copy the shape into a place where it *does* decide the
+verdict.
+
+**A `TimeSpan` passed *into* the system under test is not a test timer** —
+`new Registry(disposalWaitTimeout: TimeSpan.FromMilliseconds(50))` is production
+configuration, and choosing a small value to make behaviour observable is right.
+The prohibition is on the test measuring time, not on the code being configured
+with it.
+
+**Negative assertions** ("must NOT recreate", "must NOT emit") cannot be made
+event-driven by waiting for an absence. Gate them on the nearest real signal that
+provably comes after the moment in question, assert the negative there, and state
+the residual in a comment. Never substitute a sleep for the missing signal — it
+is not more rigorous, only slower and flakier.
 
 Expose a completion hook the test can await (e.g. a `TaskCompletionSource` the
 sink signals) rather than guessing a delay. Combine with the injected clock
@@ -174,7 +232,9 @@ When scaffolding test projects, verify:
 - [ ] No redundant tests — brevity maintained with meaningful coverage
 - [ ] AwesomeAssertions used for all assertions (no `Assert.*`)
 - [ ] NSubstitute used for all mocking
-- [ ] Async/timing tests are event-driven (await a signal or poll-with-timeout) — no `Thread.Sleep`/`Task.Delay`-then-assert, no tight `BeLessThan(TimeSpan)` ceilings
+- [ ] Async/timing tests are event-driven: every wait is on a real signal or a poll bounded ONLY by `TestContext.Current.CancellationToken`
+- [ ] No wall-clock value in any test body decides pass/fail — no sleep-then-assert, no `Stopwatch`/`BeLessThan(TimeSpan)` ceiling, no `Wait(TimeSpan)` asserted true, no `WhenAny(work, Task.Delay(n))`, no `DateTime.UtcNow` poll deadline
+- [ ] Tests that await an unbounded signal carry a framework hang ceiling (`[Fact(Timeout = …)]`), set far above a healthy run and verified to fire
 - [ ] `xunit.v3` test projects have `<OutputType>Exe</OutputType>` set (required for the house `scaffold-ci` `test-runner: mtp` default)
 - [ ] Tests build and pass
 
