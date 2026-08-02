@@ -23,17 +23,17 @@ Create and maintain xUnit test projects that mirror the `src/` structure, using 
 - Test projects use `Microsoft.NET.Sdk`
 - Test projects must reference their corresponding source project via `ProjectReference`
 - Test projects are added to the solution under the `tests` solution folder
-- New `xunit.v3` test projects set both `<OutputType>Exe</OutputType>` AND
-  `<UseMicrosoftTestingPlatformRunner>true</UseMicrosoftTestingPlatformRunner>` in the
-  `.csproj`. `OutputType=Exe` alone only enables Test-Explorer integration — the MTP
-  command-line runner/host that `dotnet test`/CI actually invokes needs the
-  `UseMicrosoftTestingPlatformRunner` property too. The house `scaffold-ci` default is
-  `test-runner: mtp`; without both properties a scaffolded project silently falls back
-  off MTP the first time CI wires up Stryker. Keep `Microsoft.NET.Test.Sdk` +
-  `xunit.runner.visualstudio` alongside it — `dotnet test` (VSTest) keeps working, the
-  two runners coexist. Does not apply to `xunit` v2 projects. Verify the generated
-  project actually runs under MTP against the CI + Stryker commands before calling it
-  done.
+- New `xunit.v3` test projects set `<OutputType>Exe</OutputType>` in the `.csproj`. The
+  generated executable is dual-mode: ordinary CLI invocation uses xUnit's in-process
+  console runner, while MTP consumers such as Stryker invoke the same executable with
+  `--server`. Do not add
+  `<UseMicrosoftTestingPlatformRunner>true</UseMicrosoftTestingPlatformRunner>` merely for
+  Stryker; that property only makes MTP the executable's default CLI entry point (for
+  example, so a direct `dotnet run -- --list-tests` works without `--server`). The house
+  `scaffold-ci` default is `test-runner: mtp` and consumes that `--server` path;
+  `OutputType=Exe` remains required. Keep `Microsoft.NET.Test.Sdk` +
+  `xunit.runner.visualstudio` alongside it so the VSTest path still works. Does not apply to
+  `xunit` v2 projects. Verified with xunit.v3 3.2.2, Stryker 4.16.0, and .NET SDK 10.0.204.
 
 ## Naming Conventions
 
