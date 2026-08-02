@@ -37,8 +37,8 @@ Adapt the project/path/solution names to the target repo. Confirm the mainline b
 **Greenfield vs normalize.** If the repo already has workflows, reconcile against them
 (rename/align, don't blind-overwrite) rather than scaffolding fresh. Before wiring frontend
 steps, confirm the UI's `package.json` actually defines `lint` / `test` / `build` scripts;
-before choosing a Stryker `test-runner`, note that a `test-case-filter` will not work under
-`mtp` — scoping comes from the working directory instead (see below).
+before configuring Stryker, choose a single-project or intentional multi-project lane, then
+confirm the selected test projects really run on MTP (see below).
 
 ## Non-negotiable house rules for `ci.yml`
 
@@ -296,9 +296,6 @@ jobs:
         run: dotnet restore YourSolution.sln
       - name: Restore local tools
         run: dotnet tool restore
-      # working-directory is load-bearing: from the repo root Stryker runs EVERY test project
-      # that references the project under test. See "Keeping slow tests out of the mutation
-      # lane" below. StrykerOutput lands beside the test project, hence the paths that follow.
       - name: Run Stryker
         working-directory: tests/Your.Project.Tests
         run: dotnet stryker --config-file ../../stryker-config.json
@@ -333,80 +330,54 @@ jobs:
   than overwriting. `scaffold-dotnet` owns the CSharpier version and repository config;
   this skill consumes it for CI.
 - `stryker-config.json` (repo root) — house defaults: `test-runner: mtp`,
-  `mutation-level: Standard`, `concurrency: 4`, `coverage-analysis: perTest` (Stryker's own
-  default), `thresholds: { high: 80, low: 70, break: 0 }` (break 0 = never fail the run).
-  Set `project` to the project under test. Deliberately **no** `solution`, **no**
-  `test-projects` and **no** `test-case-filter` — see the section below; scoping comes from
-  the working directory, not from those keys.
-  `coverage-analysis: perTest` is right *once the lane is unit-only*, and actively harmful
-  before that: it runs the tests that COVER each mutant, so with integration tests in the
-  lane it selects exactly the expensive ones. Measured on one API repo: ~39s per mutant with
-  a mixed lane, ~0.4s with a unit-only lane. Fix the lane, then this setting does what it is
-  meant to.
+  `mutation-level: Standard`, `coverage-analysis: off`, `concurrency: 4`,
+  `thresholds: { high: 80, low: 70, break: 0 }` (break 0 = never fail the run). The default
+  template is a single-project lane: set `project` to the project-under-test file name as it
+  appears in the test project's `ProjectReference`; omit `solution`, `test-projects`, and
+  `test-case-filter`. See the multi-project exception below.
 - `scripts/summarize-stryker.ps1` — shipped verbatim; renders the run into a step summary.
 
-### Keeping slow tests out of the mutation lane: structure, not filters
+### Scope MTP mutation lanes structurally
 
-**Do not rely on `test-case-filter`, and do not rely on `test-projects`.** Neither does what
-it appears to. The house pattern is: a unit-only test project, and Stryker invoked from that
-project's directory (see the `working-directory` line in the skeleton above). `StrykerOutput/`
-then lands beside the test project — update the summary step, both artifact paths, and
-`.gitignore` accordingly.
+For the ordinary lane, keep fast mutation tests in one test project and invoke Stryker from
+that directory:
 
-Two mechanisms fail silently here, and each cost about a week:
-
-**`test-projects` does not restrict execution.** From the repository root, Stryker discovers
-every test project referencing the project under test and runs all of them against every
-mutant, whatever the config says. Only the working directory scopes it. Measured on one repo:
-246 tests vs 133 on the same config; >55 min vs ~40 seconds.
-
-**`test-case-filter` is silently ignored under `test-runner: mtp`.** In Stryker's own source
-(4.16.0), `TestCaseFilter` appears only under `src/Stryker.TestRunner.VsTest/**`; the MTP
-runner project, `src/Stryker.TestRunner.MicrosoftTestPlatform/`, has no reference to it.
-Stryker emits no warning — the config parses, the run proceeds, and the filter does nothing.
-A repo sits at an acceptable runtime for months, then one feature adds a dozen
-`WebApplicationFactory` tests and the nightly falls off a cliff — and the symptom points at
-mutant count, not at a setting that never worked.
-
-**Do not "fix" this by switching to `vstest`.** It honours the filter and produces **invalid
-results**: against xunit.v3 built as an MTP executable, Stryker's VSTest runner executes tests
-but never attributes a failure to a mutant. Measured: **0 of 19** mutants killed on a class
-with dedicated unit tests, and on a larger set `Killed: 0, Survived: 224, Timeout: 194` with a
-plausible "46.41%" score that was purely timeouts (Stryker scores a timeout as a kill).
-Coverage capture fails under the same runner. **Always sanity-check `Killed:` is non-zero on
-code you know is tested** — a config that runs fast and prints a number is not the same as one
-that works.
-
-**How to check a repo in one line.** Stryker's initial test run prints the count it will use:
-
-```text
-[INF] Number of tests found: 133 for project .../Your.Project.csproj. Initial test run started.
+```yaml
+      - name: Run Stryker
+        working-directory: tests/Your.Project.Tests
+        run: dotnet stryker --config-file ../../stryker-config.json
 ```
 
-Compare it against `dotnet test --filter "Category!=Integration"`. Equal means the scoping
-works; the full-suite number means it does not. Check this first whenever a mutation run's
-runtime jumps.
+Stryker resolves the project under test through that test project's `ProjectReference`, and
+places `StrykerOutput/` in the working directory. Update the summary and artifact paths when
+the test-project path changes.
 
-**And consider whether the whole project should be mutated at all.** Mutating everything is
-the default, not a decision. A surviving mutant in DI wiring, a read-only endpoint or a
-string builder does not change an engineering decision; one in currency conversion,
-idempotency keys or an auth filter does. Scoping `mutate` to those surfaces took one repo
-from 1529 mutants (>55 min, timing out) to 418 (~20 min) while making the score mean more,
-not less. Expect the score to *drop* when you do this — uncovered scoped mutants report
-`NoCoverage` — and read that as information about the unit suite, not as a regression.
+Do not put `test-case-filter` beside `test-runner: mtp`. Stryker 4.16 accepts the setting but
+its MTP runner does not consume it, so the run proceeds unfiltered without a warning. Do not
+switch an xunit.v3 executable project to VSTest merely to regain filtering; keep slow or
+database-backed tests in a separate project outside the ordinary mutation lane.
+
+When multiple test projects are intentionally part of the mutation lane, use Stryker's
+documented `test-projects` option and invoke it from the project-under-test directory instead
+of the single-project working directory above. Adapt the config and output paths explicitly;
+this is a different lane shape, not an exception to verify after the fact. See Stryker's
+[configuration reference](https://stryker-mutator.io/docs/stryker-net/configuration/).
+
+For every new or changed runner setup, read the initial `Number of tests found` line and
+compare it with the intended lane's test count. Then target code with known defending tests
+and confirm the report contains at least one `Killed` mutant. A fast run and a plausible
+score are not evidence that discovery, filtering, or result attribution worked.
 
 **`mtp` prerequisite:** `test-runner: mtp` (Microsoft.Testing.Platform) requires the test
-project to build as an MTP executable. For **xunit.v3** the house mechanism is
-**`<OutputType>Exe</OutputType>`** AND
-**`<UseMicrosoftTestingPlatformRunner>true</UseMicrosoftTestingPlatformRunner>`** in the test
-`.csproj` — `OutputType=Exe` alone only enables Test-Explorer integration; the MTP
-command-line runner/host that `dotnet test`/CI actually invokes needs the
-`UseMicrosoftTestingPlatformRunner` property too (see `scaffold-tests`, corrected 2026-07-18,
-M-6 adversarial drift review). Keep `Microsoft.NET.Test.Sdk` +
+project to build as an MTP executable. For **xunit.v3** the house mechanism is simply
+**`<OutputType>Exe</OutputType>`** in the test `.csproj` — that makes xunit.v3 emit an MTP
+test host; no `<UseMicrosoftTestingPlatformRunner>` property is needed. Keep
+`Microsoft.NET.Test.Sdk` +
 `xunit.runner.visualstudio` alongside it so `dotnet test` (VSTest) still drives CI — the two
-runners coexist. Confirm before defaulting to `mtp`: if the test project has neither
-property (i.e. it runs purely as a VSTest library), either add both or fall back to
-`test-runner: vstest`.
+runners coexist. Confirm before defaulting to `mtp`: if the test project has no
+`OutputType=Exe` (i.e. it runs purely as a VSTest library), either add it or fall back to
+`test-runner: vstest`. *(Verified on an API repo: adding `OutputType=Exe`
+flipped Stryker to mtp with `dotnet test` still green.)*
 
 ## `dependabot.yml`
 
@@ -602,11 +573,8 @@ if explicitly asked:
 | Job/step `continue-on-error` to keep score informational | Remove it and use `break: 0`; execution/report failures must be red. |
 | Missing report only warns | Make the summary throw and set report upload `if-no-files-found: error`. |
 | Copying another repo's mutation cron | Stagger nightly UTC slots across the estate. |
-| `dotnet stryker` run from the repo root | It then runs EVERY test project referencing the target. Set `working-directory` to the unit test project. |
-| `test-runner: mtp` alongside a `test-case-filter` | The filter is silently ignored under MTP. Split the slow tests into a project Stryker does not run, not a filter. Verify with "Number of tests found". |
-| Assuming `coverage-analysis: perTest` is faster | It selects the tests that COVER each mutant. Where those are the slow integration tests it is far slower. Measure per repo. |
-| Mutating a whole project because it is the default | Scope `mutate` to surfaces where a surviving mutant would change a decision (money, auth, persistence). Wiring and read endpoints buy nothing. |
-| Diagnosing a slow mutation run from mutant count alone | Read "Number of tests found" first — tests-per-mutant is the other multiplier, and the one that fails silently. Multiply by a MEASURED per-mutant cost before concluding. |
+| `test-runner: mtp` beside `test-case-filter` | Remove the inert filter and scope the lane by test-project structure; do not switch xunit.v3 to VSTest merely for filtering. |
+| Trusting a Stryker score without checking discovery | Compare `Number of tests found` with the intended lane and require a non-zero `Killed` count on known-tested code. |
 | npm dependabot `directory: /` | Point at the actual package.json folder. |
 | Committing a `codeql.yml` | Enable default setup via the Security tab / `gh api`. |
 | PR base `branches: [main]` when mainline differs | Check `git symbolic-ref refs/remotes/origin/HEAD`. |
