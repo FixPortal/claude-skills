@@ -8,7 +8,7 @@
     ],
     "report-file-name": "mutation-report",
     "mutation-level": "Standard",
-    "coverage-analysis": "perTest",
+    "coverage-analysis": "off",
     "test-runner": "mtp",
     "concurrency": 4,
     "thresholds": {
