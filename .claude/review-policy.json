@@ -1,0 +1,21 @@
+{
+  "$comment": [
+    "Any high match makes a PR HIGH; every low match is required for LOW; otherwise NORMAL.",
+    "The first three entries protect the review control plane.",
+    "Skill content is deliberately NORMAL: it is executable agent instruction, not documentation."
+  ],
+  "version": 1,
+  "high": [
+    ".claude/review-policy.json",
+    ".coderabbit.yaml",
+    ".github/workflows/**",
+    ".github/dependabot.yml"
+  ],
+  "low": [
+    "README.md",
+    "LICENSE",
+    ".editorconfig",
+    ".gitattributes",
+    ".vscode/**"
+  ]
+}
