@@ -1,5 +1,8 @@
 # Claude Code Skills
 
+[![CI](https://github.com/FixPortal/fixportal-claude-skills/actions/workflows/ci.yml/badge.svg)](https://github.com/FixPortal/fixportal-claude-skills/actions/workflows/ci.yml)
+[![License](https://img.shields.io/github/license/FixPortal/fixportal-claude-skills)](LICENSE)
+
 A curated, sanitised subset of the authored [Claude Code](https://claude.com/claude-code)
 skills I use day to day, published as a portfolio reference. These are the
 genuinely reusable ones — scaffolding, review, and session-management workflows —
@@ -39,6 +42,23 @@ The whole value is the **non-Claude** reviewer. A multi-agent panel made only of
 Claude models is same-vendor self-review and defeats the purpose — the
 uncorrelated error of a different vendor's model is what catches what one vendor
 misses. The skill wires Claude Opus + Claude Sonnet + GPT (via the Copilot CLI).
+
+## Contributing
+
+PRs only — `main` is protected (rebase-merge, no direct pushes). Keep each
+skill self-contained under `skills/<name>/` with `SKILL.md` frontmatter
+(`name` matching the folder, `description` ≤ 1024 chars) and no
+machine-specific paths — see [AGENTS.md](AGENTS.md) for the full conventions.
+
+CI runs every `skills/**/test/verify-*.ps1` (except the
+`<repos-root>`-placeholder `verify-collect.ps1` skeleton) plus actionlint over
+the workflows. Run the verifiers locally before pushing:
+
+```powershell
+Get-ChildItem skills -Recurse -Filter 'verify-*.ps1' |
+  Where-Object Name -ne 'verify-collect.ps1' |
+  ForEach-Object { & $_.FullName }
+```
 
 ## Licence
 
