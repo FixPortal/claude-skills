@@ -110,7 +110,7 @@ version is in use.
 
   ```xml
   <ItemGroup>
-    <PackageReference Include="<YourOrg.CodeStyle>" PrivateAssets="all" />
+    <PackageReference Include="YourOrg.CodeStyle" PrivateAssets="all" />
   </ItemGroup>
   ```
 
@@ -122,10 +122,11 @@ version is in use.
   gh api -H "Accept: application/vnd.github+json" "/orgs/YourOrg/packages/nuget/YourOrg.CodeStyle/versions?per_page=100" --paginate --jq '.[].name'
   ```
 
-  Pin that concrete result centrally in `Directory.Packages.props`:
+  Pin that concrete result centrally in `Directory.Packages.props` — the version
+  below stands in for whatever that query returned:
 
   ```xml
-  <PackageVersion Include="<YourOrg.CodeStyle>" Version="<resolved-version>" />
+  <PackageVersion Include="YourOrg.CodeStyle" Version="1.4.2" />
   ```
 
   Keep the versionless shared `PackageReference` in `Directory.Build.props`.
