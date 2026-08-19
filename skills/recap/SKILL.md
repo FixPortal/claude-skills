@@ -1,381 +1,149 @@
 ---
 name: recap
-description: Use when the user runs /recap, asks for a summary of recent work and what is next, or is resuming work after a break or context switch and needs to know where things stand — not for ending a session (use /close for that). Requires a git repository.
+description: Use when the user runs /recap or resumes one Git repository and wants work reconstructed from its recap marker. Not for current cleanliness across repositories (state-of-play), writing a brief before context is lost (handoff), or ending a session (close).
 ---
 
 # Recap
 
-## Overview
+Reconstruct what changed in one repository since its last recap, then separate
+what follows into five buckets: Actionable Now, Deferred, Unverifiable,
+Operator Gated, and Information Only. The journal under `~/.agents/recap/` is
+internal plumbing, never a user-managed repository artefact.
 
-`recap` answers two questions — **what has been done** since the last recap and
-**what is next** — as fast and as straightforwardly as asking "where did we get
-up to?". It is one operation with no modes: the user asks, you give a concise
-answer.
-
-"What is next" is split by **actionability**, not lumped into one list:
-**Actionable Now** (startable this session), **Deferred** (real but parked or
-blocked), and **Information Only** (state and context, no action). The split is
-the whole value of the digest — it keeps status noise out of the list the user
-actually acts on.
-
-Before gathering, it does a quick, **safe** housekeeping pass on the local repo
-— pruning only branches and worktrees whose content is provably preserved
-elsewhere, never touching uncommitted, unpushed, or stashed work (step 2).
-
-Behind that answer is a defined, multi-source gathering process, so the answer
-is consistent and well-sourced every time. A shared per-repo journal under
-`~/.agents/recap/` backs the skill — it stores a marker so each recap analyses
-only the delta since the last one, and keeps a readable history across runtimes.
-The journal is **internal plumbing**: the user never triggers, stages, reviews,
-or is nagged about it. You maintain it silently outside the user's repository.
+Read [references/classification.md](references/classification.md) before
+classifying forward work and [references/journal.md](references/journal.md)
+before reading or updating the marker.
 
 ## Procedure
 
-### 0. Re-anchor on the user's standing instructions
+### 0. Re-anchor and recall
 
-Before anything else, **re-read the active runtime's user-level instruction file
-in full**, if that runtime has one. Resolve it from the current host; do not
-read another host's policy file or rely on a copy already in context, which may
-be summarised, truncated, or stale. Treat every rule it carries, including
-linked notes, as binding for the rest of the session.
+Before any repository work, re-read the active runtime's user-level instruction
+file in full and any canonical instruction file to which it explicitly
+delegates. Never assume an unrelated host's policy.
 
-The recap is the moment work resumes, so it is the moment to reload these rules
-and recommit to them. The recurring cost of skipping this is exactly what the
-user is tired of: re-litigating issues that were already resolved and written
-down. This step is **not optional** and is never skipped because "the rules are
-already in context". Confirm it happened with the single line described in
-step 6 — then move on; do **not** summarise or enumerate the file's contents in
-the answer.
+Before selecting a memory provider, require a Git repository and initialize
+the topic variables. Take the root in two steps, checking the exit code before
+using the output — `$ErrorActionPreference = 'Stop'` does **not** trip on a
+native nonzero exit, so an unchecked lookup outside a repository carries an
+empty root into the topic key and recalls the wrong project's memory:
 
-### 1. Verify git, compute the journal key
-
-Run `git rev-parse --is-inside-work-tree`. If it fails or prints anything other
-than `true`, answer exactly "Not a git repository — recap needs git history.
-Nothing to recap." and stop.
-
-Compute the key identifying this repo + branch:
-
-- **rootSHA** — `git rev-list --max-parents=0 HEAD`. If more than one line is
-  returned (multiple root commits), take the lexically-smallest. `<root12>` is
-  its first 12 characters; keep the full SHA for the journal header.
-- **branch** — `git rev-parse --abbrev-ref HEAD`. If this is `HEAD` (detached
-  HEAD), use `detached-` followed by `git rev-parse --short HEAD`.
-- **sanitised branch** — in the branch string, replace every character that is
-  not a letter, digit, `.`, `_`, or `-` with `-`.
-- **journal path** — `~/.agents/recap/<root12>__<sanitised-branch>.md` (two
-  underscores between the parts).
-
-### 2. Tidy the local repo — if safe
-
-A quick, best-effort housekeeping pass before gathering. Every action here errs
-on the side of caution: only ever remove things whose content is provably
-preserved elsewhere. If any command fails (offline, permission, a repo guard),
-skip it silently and continue — tidying **never** blocks the recap.
-
-Three operations, in this order, and **nothing else**:
-
-1. **`git fetch --prune`** — refresh remote-tracking refs so `gone`/merged state
-   is current before you act on it. If it fails (e.g. offline), skip the branch
-   pruning (operation 3 below) as well — a stale view of the remote is not safe
-   to delete against — but still do `git worktree prune` and continue to the
-   recap.
-2. **`git worktree prune`** — drop admin entries for worktrees whose directory
-   is already gone. Inherently safe: it never touches a live worktree's files.
-3. **Delete local branches that are provably merged AND whose remote is gone.**
-   For each local branch other than the one checked out, delete it only when
-   **both** hold:
-   - its upstream is marked `gone` (`git branch -vv` shows `: gone]`), **and**
-   - its commits are on the mainline — confirm the **rebase-merge fingerprint**
-     (same commit *titles* on `main`/default branch as on the branch, different
-     SHAs) or that `git branch --merged <default-branch>` lists it.
-
-   Both ⇒ `git branch -D <branch>` (rebase-merge gives new SHAs, so `-d` refuses;
-   `-D` is the sanctioned post-merge cleanup). Report what you pruned in one line
-   of the digest `<details>` — deletions are never silent.
-
-**Never, under any reading of "tidy":**
-
-- Delete a branch that has unpushed commits (`ahead`), no upstream at all, or is
-  not merged — *even if its remote is `gone`*. A `gone` upstream alone does
-  **not** prove a merge; the remote may have been deleted without merging. Hold
-  the branch and, if relevant, surface it.
-- `git stash drop`/`clear`, `git clean` untracked files, or discard/stash the
-  dirty working tree. Each holds the only copy of real work.
-- `git gc`, `git pull`, or otherwise advance `main`. Out of scope for a recap.
-
-### 3. Find the marker
-
-The marker is the commit a recap analyses forward from. Read the journal file.
-
-- **It exists** — the marker is the second SHA of the `<from>..<to>` token on
-  the file's first `## ` heading line (regex `\.\.([0-9a-f]{7,40})`).
-- **It does not exist** — detect the default branch: try
-  `git symbolic-ref --short refs/remotes/origin/HEAD`; if that fails, use
-  whichever of `main` or `master` `git rev-parse --verify` resolves. The marker
-  is `git merge-base <default-branch> HEAD`. If that resolves to `HEAD` (you are
-  on the default branch itself), use `HEAD~20` instead — or the repo's first
-  commit if the branch is shorter than 20 commits.
-- **Orphaned marker** — if the stored marker SHA is not in history
-  (`git cat-file -e <sha>^{commit}` fails), treat the journal as absent and
-  apply the no-journal rule above.
-
-If the SessionStart hook has already pre-loaded the latest digest into your
-context and HEAD has not moved since, the marker is known — no file read needed.
-
-### 4. Gather work done
-
-- `git log <marker>..HEAD --format='%h %s'` — one line per commit. Use this
-  `--format`: plain `git log` prints full multi-paragraph bodies and can exceed
-  read limits. Pull a single commit's body only when you need it.
-- `git diff --stat <marker>..HEAD` — files and churn.
-- `git status --short`, and `git diff --stat` for the shape of any uncommitted
-  changes.
-
-If there are no commits in `<marker>..HEAD` and no uncommitted changes,
-**re-display the last journal entry's digest** — everything from its `## `
-heading line down to (but not including) `<details>`, whatever forward sections
-that entry happens to carry (older entries predate the three-bucket split and
-may still show a single **Up next**; render them as-is) — prefaced with a
-one-line note that nothing has moved, e.g. "No new work since last recap —
-here's the last one:". Then stop; write nothing to the journal.
-If the SessionStart hook has already loaded the latest digest into your
-context, render that; otherwise read the journal file. If the journal is
-genuinely empty (first-ever recap on a branch with no commits past the
-default-branch marker), answer "No work to recap on this branch yet." and
-stop.
-
-The first-ever recap has no marker and spans the whole branch; it may cover many
-commits. Summarise at the theme level, not commit by commit, within the bullet
-caps.
-
-### 5. Gather what's next
-
-Consult every source; silently skip any that is absent — a missing source is
-never an error.
-
-- **`[code]`** — `TODO` / `FIXME` / `HACK` / `XXX` comments in files changed
-  since the marker. If the changed set is large, scope to the actively-developed
-  source, not every file. Skip vendor / third-party trees. Do **not** run the
-  test suite.
-- **`[doc]`** — opportunistically, if they exist at or near the repo root:
-  `TODO.md`, `ROADMAP.md`, `NEXT.md`, any `PLAN*.md`, and the "unreleased"
-  section of a `CHANGELOG`. Never required.
-- **`[pr]`** — if the `gh` CLI is available and authenticated, the current
-  branch's open pull request (`gh pr view --json title,body,url`). Skip silently
-  if `gh` is absent, unauthenticated, or there is no PR.
-- **`[memory]`** — relevant `project` and `feedback` memories already in your
-  context. No file read needed.
-- **ICM** — if `mcp__icm__icm_memory_recall` is available, call it for
-  `context-{repo-basename}` (query: "project state status next steps") and
-  `decisions-{repo-basename}` (query: "architecture decision rationale") to
-  surface cross-session context not in the file-based memory. Skip silently if
-  unavailable or empty. ICM is a recall channel, not a separate render tag —
-  items sourced this way carry the `[memory]` tag in the digest, same as any
-  other memory-sourced item.
-
-**Then classify every candidate into one of five buckets.** This split is the
-whole point of the digest — do it deliberately, item by item. The bucket is
-about *actionability*, independent of which source the item came from:
-
-- **Actionable Now** — work you could pick up **this session with nothing
-  blocking it**: a concrete next step, an unblocked `TODO`/`FIXME`, review
-  feedback to act on, the next phase of a plan, an open PR that needs *your*
-  action (address comments, merge). If you could literally start it now, it
-  goes here.
-- **Deferred** — real, intended work **in this repository** that is parked or
-  blocked: waiting on a prerequisite in this repo, gated behind another local
-  task, scheduled for a later phase, or explicitly postponed. Strictly
-  this-repo scope — nothing cross-repo or operator-gated belongs here.
-- **Unverifiable** — items that require work in **another repository** (a
-  different checkout, a consuming frontend, an upstream package) and whose
-  status has not been confirmed by reading that repo's state. Before placing
-  an item here, attempt to verify it: if the sibling repo's path is known or
-  discoverable on disk, read it (git log, grep for the relevant symbol/path)
-  to determine whether the work is still pending. If it is still pending,
-  move it to Actionable Now (if it can be done here) or keep it here with a
-  note of what was found. If it is already done, drop it entirely or move it
-  to Information Only. If the path cannot be found, leave it here.
-- **Operator Gated** — items that are blocked on a **human action outside the
-  codebase**: a credentialed CLI run (`az`, `gh`, cloud console), a manual
-  deploy, an approval, a smoke test that requires a live environment. Cannot
-  be unblocked by any tool call in this session.
-- **Information Only** — state and context that carries **no action**: a
-  clean/in-sync working tree, no open PR, a decision already recorded as closed
-  ("don't reopen"), background facts about where things stand. This is the
-  bucket that keeps status out of the action list.
-
-When torn between Actionable Now and Deferred, ask "could I literally start this
-right now in this repo?" — if no, it is **Deferred**. If it requires another
-repo, attempt to verify first; if unresolved, it is **Unverifiable**. If it
-requires a human/credentialed action, it is **Operator Gated**. A pure status
-fact is always **Information Only**.
-
-**Memory-only verification gate.** After initial classification, revisit every
-candidate whose only evidence is a prior journal entry or `[memory]` (no `[code]`
-TODO/FIXME, no open `[pr]`, no `[doc]` that corroborates it). For each, ask: is
-there a local signal in *this* repo right now that confirms the work is still
-open? If not, it cannot be Actionable Now — place it in Deferred (this-repo,
-blocked), Unverifiable (cross-repo, attempt verification first), or Operator
-Gated (human-action required). Memory can be stale and must never promote an
-item to Actionable Now on its own.
-
-**Cross-repo: verify before filing as Unverifiable.** If an item requires work
-in another repository and that repo's path is known or discoverable on disk,
-read it to check status before placing it in Unverifiable. A verified-done item
-belongs in Information Only, not Unverifiable. Deferred is strictly for
-this-repo work; Operator Gated is for human-action blockers.
-
-### 6. Answer the user
-
-Give the digest: the heading line (format below), then **Done since last
-recap**, then the five forward-looking sections — **Actionable Now**,
-**Deferred**, **Unverifiable**, **Operator Gated**, **Information Only** —
-nothing from inside `<details>`. This is what the user asked for: lead with it,
-keep it tight, and do not narrate the steps you took.
-
-- **Actionable Now** is a **numbered** list in recommended order: put whatever
-  unblocks or is a prerequisite for other items first, then order by leverage.
-  This is the section the user acts on — it leads the forward-looking part.
-- **Deferred**, **Unverifiable**, **Operator Gated**, and **Information Only**
-  are bulleted (`-`).
-- **Render all five headings every time.** If a bucket is empty, show it with a
-  single `- none` bullet rather than dropping the heading — the `- none`
-  placeholder uses a dash even under the otherwise-numbered Actionable Now.
-- Keep every forward-looking entry tagged with its source: `[code] [doc] [pr]
-  [memory]`. An entry drawing on more than one source may carry more than one
-  tag (e.g. `[pr] [doc]`).
-- Cap each section at 7 entries; push overflow into `<details>`. Keep
-  **Information Only** the tersest — it is the section most likely to become
-  noise.
-
-End the digest with one confirmation line. If the active runtime has a
-user-level instruction file, confirm that you re-read and will follow it — e.g.
-`✓ Re-read active global instructions — standing house rules in force for this
-session.` If it has none, say `✓ No runtime-level instruction file for this host
-— none to re-read.` Do not list the rules. This line proves step 0 happened.
-
-### 7. Update the journal — silently
-
-Plumbing. Do it quietly — no announcement, no "I have saved this", no staleness
-remark, no commit.
-
-- **If `<marker>..HEAD` contains new commits** — prepend a new entry (format
-  below) to the journal file, creating the `~/.agents/recap/` directory and the
-  file if they do not exist. A new file begins with a
-  `# Recap Journal — <repo name>` title (`<repo name>` is the basename of
-  `git rev-parse --show-toplevel`), then on the next line the comment
-  `<!-- key: rootSHA=<full rootSHA> branch=<raw branch> -->`, then a blank line,
-  then the entry.
-- **If it contains no new commits** — only uncommitted changes, or nothing —
-  write nothing. The marker advances only to a real commit, never to volatile
-  working-tree state. Your step-6 answer still describes any uncommitted work;
-  it is simply not journalled until committed.
-
-### 8. Store recap digest to ICM — silently
-
-After writing the journal (step 7), if `mcp__icm__icm_memory_store` is available,
-store the recap digest to ICM: topic `context-<repo-basename>`, importance `medium`,
-body = the **Done since last recap** bullets plus the five forward sections. Skip
-silently if unavailable or if step 7 wrote nothing (no new commits).
-
-## Entry format
-
-```text
-## YYYY-MM-DD HH:MM — <branch> — <fromSHA>..<toSHA>
-
-**Done since last recap**
-- 3–7 concise bullets
-
-**Actionable Now**
-1. numbered, recommended order; each tagged [code] [doc] [pr] [memory]
-
-**Deferred**
-- parked or blocked work in this repo; each tagged [code] [doc] [pr] [memory]
-
-**Unverifiable**
-- cross-repo items whose status could not be confirmed; each tagged [code] [doc] [pr] [memory]
-
-**Operator Gated**
-- blocked on a human/credentialed action; each tagged [code] [doc] [pr] [memory]
-
-**Information Only**
-- state/context, no action; each tagged [code] [doc] [pr] [memory]
-
-<details><summary>Detail</summary>
-
-Commit list, file-change stats, caveats — the fuller record.
-
-</details>
+```powershell
+$rootRaw = git rev-parse --show-toplevel
+if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($rootRaw)) { throw 'recap requires a Git repository' }
+$repoRoot = [IO.Path]::GetFullPath($rootRaw.Trim())
 ```
 
-- Entries are newest-first — prepend each new entry directly below the title and
-  key comment.
-- The `## ` heading line is the parse anchor; the `<fromSHA>..<toSHA>` token is
-  found by regex, the separators around it are cosmetic. `<toSHA>` is `HEAD` at
-  recap time and becomes the next run's marker.
-- Timestamp the heading with local system time.
-- Cap each digest section at 7 bullets; everything else goes inside `<details>`.
-- Always write all five forward sections (**Actionable Now**, **Deferred**,
-  **Unverifiable**, **Operator Gated**, **Information Only**); an empty bucket
-  gets a single `- none` bullet, never a dropped heading. Actionable Now is
-  numbered; the other four are bulleted.
-- When an entry is written and uncommitted work also exists, flag it
-  `(uncommitted)` in the digest and note the files in `<details>`.
+Resolve the shared recipe with `$recipePath = (Resolve-Path (Join-Path $PSScriptRoot '..\close\references\topic-key.ps1')).Path`, and dot-source it with `. $recipePath`. It provides `Get-RepositoryTopicInfo` and `Get-RemoteRepositoryName`; call each once, in the block below.
+Assign `$repoDisplayName = $topicInfo.DisplayName`,
+`$repoTopicKey = $topicInfo.TopicKey`,
+`$contextTopic = $topicInfo.ContextTopic`, and
+`$decisionsTopic = $topicInfo.DecisionsTopic`. The recipe is
+[../close/references/topic-key.ps1](../close/references/topic-key.ps1); it
+normalizes the resolved root and appends a SHA-256 suffix, so
+spaces/metacharacters cannot merge distinct repositories.
 
-## Common mistakes
+Pass the repository's GitHub name too, so historical topics are derivable:
 
-- **Skipping the re-anchor (step 0).** Re-reading the active runtime's global
-  instructions is the first thing a recap does and the most likely thing to get
-  rationalised away ("it's already in context", "I know the rules"). Don't —
-  read the file fresh every time and end the digest with the one-line
-  confirmation.
-- **Over-eager tidying.** The step-2 tidy deletes only branches that are *both*
-  provably merged (rebase-merge fingerprint / `git branch --merged`) *and*
-  remote-gone, plus already-dead worktrees. A `gone` upstream alone is **not**
-  proof of a merge. Never delete unpushed, unmerged, or upstream-less branches,
-  never drop a stash, never `git clean`, never discard the working tree, never
-  `git gc`/`pull`. Tidy failures (offline, guards) are skipped, never fatal.
-- **Adding ceremony.** The journal is plumbing — do not announce writing it, do
-  not call it "saved for review", do not nag about staleness.
-- **Journalling uncommitted-only state.** An entry is written only for new
-  commits. Uncommitted changes are described in the answer but never produce an
-  entry on their own.
-- **Running the test suite.** Too slow — use static code signals only.
-- **Treating a missing source as an error.** No planning docs, no PR, no
-  memories — each is skipped silently.
-- **Writing into the user's repo.** The journal lives under `~/.agents/recap/`,
-  never in the repository.
-- **A wall of text.** Each section is capped at 7 bullets; detail belongs inside
-  `<details>`. Keep **Information Only** the tersest.
-- **Leaking status into Actionable Now.** A clean/in-sync tree, "no open PR", or
-  a closed-and-don't-reopen decision is **Information Only**, never an action.
-  Work that is blocked or handed off is **Deferred**, never Actionable Now. If
-  you cannot literally start it this session, it does not belong in Actionable
-  Now. Misfiling here is exactly the noise the split exists to remove.
-- **Promoting stale memory to Actionable Now.** An item carried forward from a
-  prior journal entry or sourced only from `[memory]` must pass the
-  memory-only verification gate (step 5) before landing in Actionable Now.
-  If no local signal (`[code]` TODO/FIXME, open `[pr]`, corroborating `[doc]`)
-  confirms it is still open, it goes to **Deferred** (this-repo) or
-  **Unverifiable** (cross-repo). This is the most common source of phantom
-  Actionable Now items — items completed in another repo, or weeks ago, that
-  linger because memory was never updated.
-- **Cross-repo items in Actionable Now or Deferred.** Work that requires a
-  different repository belongs in **Unverifiable** (attempt to verify first) or
-  **Information Only** (if already confirmed done). Deferred is strictly
-  this-repo scope. Operator Gated is for human/credentialed blockers, not
-  cross-repo work.
-- **Skipping cross-repo verification.** Before filing a cross-repo item as
-  Unverifiable, try to read the sibling repo if its path is known or
-  discoverable. A verified-done item is Information Only, not Unverifiable.
-  Only file as Unverifiable if the path can't be found or the check is
-  inconclusive.
-- **Mixing Unverifiable and Operator Gated.** These are distinct: Unverifiable
-  = work in another repo, status unknown. Operator Gated = human action
-  required (credentialed CLI, live environment, approval). Keep them separate.
-- **Collapsing the split or dropping empty buckets.** Always render all five
-  forward headings; an empty one shows `- none`. Do not revert to fewer
-  buckets or a single "Up next".
-- **Bare "nothing new" answer.** When `<marker>..HEAD` is empty, re-render the
-  last entry's digest — the user is asking where things stand, not whether the
-  marker has advanced.
+```powershell
+$remoteUrl = git remote get-url origin 2>$null
+if ($LASTEXITCODE -ne 0) { $remoteUrl = $null }
+$topicInfo = Get-RepositoryTopicInfo -RepositoryRoot $repoRoot -RemoteName (Get-RemoteRepositoryName -RemoteUrl $remoteUrl)
+```
+
+Check `$LASTEXITCODE` on the line directly after the `git` call — a repository with
+no `origin` is normal, and `Get-RemoteRepositoryName` returns `$null` for anything
+unusable, which simply yields the four-topic read set.
+
+Then read `$topicInfo.ReadTopics` — the deduplicated set of every topic this
+repository's memory has ever been filed under. Do not assemble that list by
+hand. The suffix arrived on 2026-08-12 with no migration, so anything stored
+before it lives under the unsuffixed name; and `icm remember` files under the
+git remote name while close used the directory name, which differ wherever a
+checkout's folder is not named after its repository. Measured that day on one
+such checkout: 1 memory under the derived topic, 27 under the unsuffixed
+directory name, 4 under the remote name — all three the same project. Recap
+never writes, so reading a historical channel costs it nothing.
+
+Now use the runtime's native project-memory recall when its active contract
+defines one. Otherwise, if `icm.exe` resolves on `PATH`, enumerate all four exact
+topics with [references/recall-icm-topics.ps1](references/recall-icm-topics.ps1):
+
+```powershell
+$memoryBodies = & "$PSScriptRoot\references\recall-icm-topics.ps1" -Topics $topicInfo.ReadTopics
+```
+
+It calls `icm.exe list --topic "$topic" --all --format json`, not the
+five-result-default `recall` command. Each list result is a complete stored
+memory record. If either exact topic cannot be enumerated or parsed, use no
+ICM candidate context for that failed topic and record the incomplete recall
+in journal detail; never treat a partial result as complete.
+
+Keep the results as candidate context; prior recap digests are never evidence
+for forward work.
+
+### 1. Establish scope
+
+The repository check was completed before memory selection. If it was not true,
+answer `Not a git repository — recap needs git history. Nothing to recap.` and
+stop.
+Compute the branch-specific journal key and marker exactly as the journal
+reference specifies.
+
+### 2. Safe housekeeping
+
+Best effort only; failure never blocks recap:
+
+1. `git fetch --prune`; if it fails, do not delete branches.
+2. `git worktree prune` for already-missing worktrees.
+3. Delete a non-current branch only when its upstream is gone and its commits
+   are proved on mainline by the standing rebase-merge title fingerprint or
+   `git branch --merged`. Report deletions in digest detail.
+
+Never delete an upstream-less, ahead, or unmerged branch; never drop stashes,
+clean files, discard changes, run `git gc`, or pull.
+
+### 3. Gather done
+
+Run compact history and state commands:
+
+- `git log <marker>..HEAD --format='%h %s'`
+- `git diff --stat <marker>..HEAD`
+- `git status --short`, `git diff --cached --stat`, and `git diff --stat`
+  (or [references/get-working-state.ps1](references/get-working-state.ps1)).
+  Keep staged and unstaged stats separate; the marker-to-HEAD diff covers only
+  committed work and must not be recomputed from `HEAD`.
+
+If neither commits nor working-tree changes exist, re-display the last journal
+digest and write nothing. If no entry exists, say there is no work to recap.
+
+### 4. Gather and classify forward work
+
+Consult live markers in changed code, nearby planning docs, the current
+branch's open PR when authenticated, full relevant memory bodies, and the
+task-start recall. Skip missing sources silently and do not run tests.
+
+Re-derive every forward item from a current primary source. A memory index is
+only a pointer; open the body. A prior journal or ICM recap is self-authored
+history, not corroboration. Apply the classification reference, including its
+closure, absence, cross-repo, and optional-pass rules.
+
+### 5. Answer
+
+Return the journal heading, `Done since last recap`, and all five forward
+headings. Actionable Now is numbered in recommended order; the other buckets
+are bulleted. Use `- none` for an empty bucket. Tag every forward item with
+`[code]`, `[doc]`, `[pr]`, or `[memory]`; cap each bucket at seven entries and
+put overflow in journal detail.
+
+End with one line:
+
+- `[OK] Re-read active global instructions — standing house rules in force for this session.`
+- Or, when absent: `[OK] No runtime-level instruction file for this host — none to re-read.`
+
+### 6. Persist silently
+
+Only when the range contains new commits, prepend the entry described in the
+journal reference. Never journal uncommitted-only state. If `icm.exe` resolves
+on `PATH`, store only Done bullets plus the commit range in
+`$contextTopic`; never store forward buckets or write to the decisions topic.

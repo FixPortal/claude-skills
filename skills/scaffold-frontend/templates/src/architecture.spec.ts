@@ -34,9 +34,9 @@ const TS_CONFIG = 'tsconfig.app.json'
 
 // Test files (and the architecture specs themselves) reach across layers by
 // design; exclude them from layering AND cycle rules. Matches the
-// `*.{test,spec}.*` set vitest.config.ts uses — `*.spec.*` must be here too, or
-// this spec file and its `.archunit` wrapper become nodes in their own analysis.
-const EXCEPT_TESTS = { except: { withName: '*.{test,spec}.*' } }
+// `*.{test,spec}.*` set vitest.config.ts uses, plus the local `.archunit`
+// wrapper. All three are test infrastructure and must not become analysis nodes.
+const EXCEPT_TESTS = { except: { withName: '*.{test,spec,archunit}.*' } }
 
 // TODO 3 -- replace with this project's FORBIDDEN_EDGES. Each row asserts:
 // nothing in `from` may import from `to`. Derive from the layer diagram: for each

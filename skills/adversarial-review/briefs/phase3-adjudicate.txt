@@ -37,14 +37,23 @@ Produce the final report:
   code is worth far more than one left hanging as "[contested]". Do not invent a
   resolution you cannot evidence; if the code does not settle it, keep it
   contested and say what evidence is missing.
-- Two reviewers (the cross-vendor models, Gemini and GPT) saw ONLY the diff —
-  never the repository. When one's verdict is "needs evidence" or it withholds
+- Reviewers whose manifest entry has `repoAccess:false` saw ONLY the diff and
+  supplied context — never the repository. When one's verdict is "needs evidence" or it withholds
   purely because a contract, caller, or type it would need lives in code the
   diff does not show, that is a repo-access limitation, not genuine doubt. Do
   not let a diff-bound abstention keep a finding contested or hold its severity
   down: read the repo, settle the mechanism, and rate it on what the code
   actually does. Conversely, do not inflate a finding just because a repo-blind
   reviewer flagged it without being able to check.
+- A repo-blind reviewer's line numbers are frequently offsets into the diff file
+  it was handed, not source-file lines. Before calling any citation fabricated or
+  hallucinated, check the number against the diff as well as against the source.
+  Measured 2026-08-16: an adjudication dismissed two of one vendor's verdicts as
+  resting on "fabricated line numbers (App.tsx:603, 609-617)" — line 603 of that
+  chunk's diff was exactly the line under discussion, and both dissents were
+  genuine. A wrong coordinate system is a citation defect; it is not evidence
+  that a finding is invented, and it is never grounds to discount the reviewer's
+  substance. Re-anchor the citation yourself, then judge the claim.
 - Enforce the Phase-1 severity discipline at adjudication too: a Critical or
   High must have a real, named trigger (a caller/path/input that reaches it). If
   the evidence shows no such path exists, re-rate it down to "latent" Medium (or

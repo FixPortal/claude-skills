@@ -11,9 +11,13 @@ repeated here.
   placeholders (`~/.claude/...`, `<vault>`, `<workdir>`, `you@example.com`,
   `Acme`). The `verify-*.ps1` scripts fail the build on leaked Windows
   user-profile or drive-root path tokens.
-- Skills here are a sanitised subset of a larger private working set. Sync
-  from the private canonical copies with `sync-private-skills`; do not edit
-  the public and private copies independently.
+- Skills here are a sanitised subset of a larger private working set. Port
+  changes one way, from the private canonical copy into this mirror; do not
+  edit the public and private copies independently.
+- A verifier that reaches for a sibling skill this mirror does not publish
+  must skip with a stated reason (`Write-Host "SKIP: ..."`), never fail. The
+  same convention already covers notes and policy files that live outside the
+  repository.
 
 ## Skill shape
 

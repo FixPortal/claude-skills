@@ -1,0 +1,413 @@
+#Requires -Version 7
+<#
+.SYNOPSIS
+    Read-only inventory of effective .NET analyzer and code-style configuration.
+
+.DESCRIPTION
+    Deterministic sweep for the audit-dotnet-analyzers skill. Emits JSON describing
+    SDK selection, target frameworks, language version, analyzer packages (including
+    analyzers bundled inside shared CodeStyle packages), the config-file hierarchy,
+    and the warnings-as-errors policy.
+
+    READ-ONLY. Writes nothing inside the audited repository. Captures `git status`
+    so the caller can prove nothing mutated.
+
+    It reports raw facts. It does not resolve effective severity or judge findings —
+    that is the agent's job, and it needs the real overload/provenance evidence the
+    skill demands.
+
+.PARAMETER Path
+    Repository root, or a workspace folder containing several repos.
+
+.PARAMETER Workspace
+    Treat Path as a workspace: discover every git repo beneath it and inventory each.
+
+.EXAMPLE
+    ./inventory-dotnet-analysis.ps1 -Path <workdir>\your-repo
+
+.EXAMPLE
+    ./inventory-dotnet-analysis.ps1 -Path <workdir> -Workspace | Out-File audit.json
+#>
+[CmdletBinding()]
+param(
+    [Parameter(Mandatory)]
+    [string] $Path,
+
+    [switch] $Workspace
+)
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+
+# Properties whose values decide whether a diagnostic can break a build.
+$PolicyProperties = @(
+    'TargetFramework', 'TargetFrameworks', 'LangVersion', 'Nullable',
+    'TreatWarningsAsErrors', 'WarningsAsErrors', 'WarningsNotAsErrors', 'NoWarn',
+    'AnalysisLevel', 'AnalysisMode', 'EnableNETAnalyzers', 'EnforceCodeStyleInBuild'
+)
+
+$ProjectFilePattern = '\.(csproj|fsproj|props|targets)$'
+
+$ConfigFileNames = @(
+    '.editorconfig', 'global.json', 'NuGet.config', 'nuget.config',
+    'Directory.Build.props', 'Directory.Build.targets',
+    'Directory.Packages.props', 'Directory.Build.rsp', 'packages.lock.json'
+)
+
+function Get-NuGetGlobalPackagesFolder {
+    <# The global packages folder is NOT always ~/.nuget/packages. It is overridable by
+       the NUGET_PACKAGES environment variable and by `globalPackagesFolder` in a
+       NuGet.config -- both common in CI. Getting this wrong makes Get-BundledAnalyzers
+       silently report CacheHit=$false, which hides bundled analyzers entirely and drops
+       the caller into the very attribution trap this skill exists to catch.
+
+       NuGet.config resolution is DIRECTORY-SENSITIVE: `dotnet` walks up from its working
+       directory. So this MUST be called with the working directory set to the repo being
+       inventoried -- resolving once from the script's own cwd and reusing that for every
+       repo would silently ignore a repo-local globalPackagesFolder. Callers push into the
+       repo first. #>
+    try {
+        $output = & dotnet nuget locals global-packages --list 2>$null
+        if ($LASTEXITCODE -eq 0 -and $output) {
+            # Format: "global-packages: <user-profile>\.nuget\packages"
+            $match = $output | Select-String -Pattern 'global-packages:\s*(.+)$' | Select-Object -First 1
+            if ($match) {
+                $candidate = $match.Matches[0].Groups[1].Value.Trim()
+                if ($candidate) { return $candidate }
+            }
+        }
+        Write-Verbose "dotnet nuget locals returned no usable path (exit $LASTEXITCODE); falling back."
+    }
+    catch {
+        # Never swallow this silently: a wrong cache root makes bundled analyzers
+        # invisible, which is the exact failure this function exists to prevent.
+        Write-Verbose "dotnet nuget locals failed: $($_.Exception.Message). Falling back."
+    }
+
+    if ($env:NUGET_PACKAGES) { return $env:NUGET_PACKAGES }
+    return (Join-Path $HOME '.nuget/packages')
+}
+
+function Get-Tree {
+    <# ONE recursive walk, pruned as it goes. Build output and vendored trees are dropped
+       during the walk rather than after it, so a large workspace is neither materialised
+       nor re-filtered. `.git` entries themselves are KEPT -- they are how repo roots are
+       discovered -- but their contents are not.
+
+       The exclusion is tested against the path RELATIVE to $Root, never the absolute
+       path. An absolute-path match would prune everything the moment the scanned path
+       itself sat under a segment named `bin`, `obj` or `node_modules` (<workdir>\build\bin\repos),
+       yielding a silently empty inventory -- the exact quiet failure this skill exists to
+       prevent. #>
+    param([string] $Root, [System.Collections.Generic.List[string]] $Unreadable)
+
+    $excluded = '(^|[\\/])(obj|bin|node_modules|\.git)([\\/]|$)'
+    $items = [System.Collections.Generic.List[object]]::new()
+    $pending = [System.Collections.Generic.Queue[string]]::new()
+    $pending.Enqueue($Root)
+
+    while ($pending.Count -gt 0) {
+        $directory = $pending.Dequeue()
+        # -ErrorAction SilentlyContinue alone made an UNREADABLE directory (permissions, a
+        # broken junction, a path over MAX_PATH) indistinguishable from an EMPTY one, so an
+        # unread subtree reported as "no analyzer configuration found" - an observation the
+        # walk never actually made. Errors are captured and surfaced, not swallowed.
+        $walkErrors = $null
+        $children = @(Get-ChildItem -LiteralPath $directory -Force -ErrorAction SilentlyContinue -ErrorVariable walkErrors)
+        foreach ($e in @($walkErrors)) {
+            # TargetObject is only trusted when it is already a plain string. Depending on
+            # the error it can be a FileSystemInfo, a child item, or null - all truthy or
+            # unhelpful - so a bare [string] cast would record a stringified object in
+            # UnreadablePaths instead of a path. $directory is always the thing that
+            # actually failed to enumerate.
+            $path = if ($e.TargetObject -is [string] -and $e.TargetObject) { $e.TargetObject } else { $directory }
+            if ($null -ne $Unreadable -and -not $Unreadable.Contains($path)) { $Unreadable.Add($path) }
+        }
+        foreach ($entry in $children) {
+            # Keep the marker so repo discovery works, but never traverse git internals.
+            if ($entry.Name -eq '.git') {
+                $items.Add($entry)
+                continue
+            }
+
+            $relative = [IO.Path]::GetRelativePath($Root, $entry.FullName)
+            if ($relative -match $excluded) { continue }
+
+            $items.Add($entry)
+            if ($entry.PSIsContainer -and -not ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+                $pending.Enqueue($entry.FullName)
+            }
+        }
+    }
+
+    return @($items)
+}
+
+function Get-RepoRootsFromTree {
+    <# A repo root is any directory containing `.git`. That `.git` is a DIRECTORY in a
+       normal clone but a FILE (a gitdir pointer) in a submodule or a linked worktree,
+       so do not filter to directories only. #>
+    param([object[]] $Tree)
+
+    return @(
+        $Tree |
+            Where-Object { $_.Name -eq '.git' } |
+            ForEach-Object { $_.PSParentPath -replace '^.*::', '' } |
+            Sort-Object -Unique
+    )
+}
+
+function Group-FilesByOwningRepo {
+    <# Assign each file to the DEEPEST repo root that contains it, in a single pass.
+
+       Deepest-root ownership IS the nested-repository boundary rule: a file inside a
+       submodule or linked worktree belongs to that child, never to the parent. Doing it
+       once here (rather than re-scanning the whole tree per repo) keeps a workspace run
+       linear in file count instead of O(repos x files). #>
+    param([object[]] $Tree, [string[]] $RepoRoots)
+
+    $sep = [IO.Path]::DirectorySeparatorChar
+
+    # Longest prefix first, so the first match is the deepest owning repo.
+    $ordered = @($RepoRoots | Sort-Object -Property Length -Descending |
+                 ForEach-Object { [pscustomobject]@{ Root = $_; Prefix = $_.TrimEnd($sep) + $sep } })
+
+    $byRepo = @{}
+    foreach ($root in $RepoRoots) { $byRepo[$root] = [System.Collections.Generic.List[object]]::new() }
+
+    foreach ($item in $Tree) {
+        if ($item.PSIsContainer -or $item.Name -eq '.git') { continue }
+        $full = $item.FullName
+        foreach ($candidate in $ordered) {
+            if ($full.StartsWith($candidate.Prefix, [StringComparison]::OrdinalIgnoreCase)) {
+                $byRepo[$candidate.Root].Add($item)
+                break
+            }
+        }
+    }
+    return $byRepo
+}
+
+function Get-ProjectDocuments {
+    <# Enumerate and parse each project/props/targets file ONCE. Package references and
+       policy properties are both read from this single parsed set, rather than each
+       walking (and re-parsing) the whole tree independently. #>
+    param([object[]] $Files, [string] $Repo)
+
+    $docs = [System.Collections.Generic.List[object]]::new()
+    foreach ($file in ($Files | Where-Object { $_.Name -match $ProjectFilePattern })) {
+        try { [xml] $xml = Get-Content -LiteralPath $file.FullName -Raw }
+        catch { continue }
+        $docs.Add([pscustomobject]@{
+            Xml      = $xml
+            Relative = [IO.Path]::GetRelativePath($Repo, $file.FullName)
+        })
+    }
+    return $docs
+}
+
+function Get-PackageRefs {
+    param([object[]] $Documents)
+
+    $refs = [System.Collections.Generic.List[object]]::new()
+    foreach ($doc in $Documents) {
+        foreach ($kind in 'PackageReference', 'PackageVersion', 'GlobalPackageReference') {
+            foreach ($node in $doc.Xml.SelectNodes("//*[local-name()='$kind']")) {
+                $id = $node.GetAttribute('Include')
+                if (-not $id) { continue }
+                $refs.Add([pscustomobject]@{
+                    Kind    = $kind
+                    Id      = $id
+                    Version = $node.GetAttribute('Version')
+                    File    = $doc.Relative
+                })
+            }
+        }
+    }
+    return $refs
+}
+
+function Get-PolicyProperties {
+    param([object[]] $Documents)
+
+    $found = [System.Collections.Generic.List[object]]::new()
+    foreach ($doc in $Documents) {
+        foreach ($prop in $PolicyProperties) {
+            foreach ($node in $doc.Xml.SelectNodes("//*[local-name()='PropertyGroup']/*[local-name()='$prop']")) {
+                $found.Add([pscustomobject]@{
+                    Property = $prop
+                    Value    = $node.InnerText
+                    File     = $doc.Relative
+                })
+            }
+        }
+    }
+    return $found
+}
+
+function Get-BundledAnalyzers {
+    <# A shared CodeStyle package can ship SonarAnalyzer plus a global AnalyzerConfig.
+       Grepping the repo will never reveal this. Look inside the cached package. #>
+    param([string] $Id, [string] $Version, [string] $CacheFolder)
+
+    $root = Join-Path $CacheFolder (Join-Path $Id.ToLowerInvariant() $Version)
+    if (-not (Test-Path -LiteralPath $root)) {
+        return [pscustomobject]@{
+            Id        = $Id
+            Version   = $Version
+            CacheHit  = $false
+            CacheRoot = $CacheFolder
+        }
+    }
+
+    $deps = @()
+    $nuspec = Get-ChildItem -LiteralPath $root -Filter '*.nuspec' -File -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($nuspec) {
+        try {
+            [xml] $x = Get-Content -LiteralPath $nuspec.FullName -Raw
+            $deps = @($x.SelectNodes("//*[local-name()='dependency']") | ForEach-Object {
+                [pscustomobject]@{ Id = $_.GetAttribute('id'); Version = $_.GetAttribute('version') }
+            })
+        }
+        catch { $deps = @() }
+    }
+
+    $configs = @(
+        Get-ChildItem -LiteralPath $root -Recurse -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.Extension -in '.globalconfig', '.editorconfig' } |
+            ForEach-Object { [IO.Path]::GetRelativePath($root, $_.FullName) }
+    )
+
+    return [pscustomobject]@{
+        Id            = $Id
+        Version       = $Version
+        CacheHit      = $true
+        CachePath     = $root
+        Dependencies  = $deps
+        ShippedConfig = $configs
+    }
+}
+
+function Get-GitStatus {
+    param([string] $Repo)
+    try {
+        $status = & git -C $Repo status --porcelain 2>$null
+        if ($LASTEXITCODE -ne 0) { return $null }
+        return @($status)
+    }
+    catch { return $null }
+}
+
+function Get-RepoInventory {
+    param([object[]] $Files, [string] $Repo)
+
+    $before = Get-GitStatus -Repo $Repo
+
+    # Both `dotnet` calls must run FROM the repo: NuGet.config and global.json are
+    # resolved by walking up from the working directory, so a repo-local
+    # globalPackagesFolder or SDK pin is only honoured if we are standing in the repo.
+    $cacheFolder = $null
+    $sdk         = $null
+
+    # Push OUTSIDE the try: if Push-Location itself fails there is nothing to pop, and a
+    # Pop-Location in `finally` would unwind someone else's location instead.
+    Push-Location $Repo
+    try {
+        $cacheFolder = Get-NuGetGlobalPackagesFolder
+        $sdk = (& dotnet --version 2>$null)
+        if ($LASTEXITCODE -ne 0) { $sdk = $null }
+    }
+    catch {
+        # Same rule as Get-NuGetGlobalPackagesFolder: never swallow this silently. A null
+        # SDK or cache root is a reportable gap in the evidence, not a shrug.
+        Write-Verbose "SDK/cache probe failed in '$Repo': $($_.Exception.Message)"
+    }
+    finally { Pop-Location }
+
+    $configFiles = @(
+        $files |
+            Where-Object { $_.Name -in $ConfigFileNames -or $_.Extension -in '.globalconfig', '.ruleset' } |
+            ForEach-Object { [IO.Path]::GetRelativePath($Repo, $_.FullName) }
+    )
+
+    $documents = Get-ProjectDocuments -Files $files -Repo $Repo
+    $refs      = Get-PackageRefs -Documents $documents
+
+    # Anything that plausibly ships analyzers, plus every GlobalPackageReference:
+    # a shared style package is the usual carrier and rarely name-matches.
+    $analyzerish = @($refs | Where-Object {
+        $_.Kind -eq 'GlobalPackageReference' -or
+        $_.Id -match '(?i)analyz|sonar|stylecop|roslynator|meziantou|codestyle'
+    })
+
+    $bundled = @(
+        $analyzerish |
+            Where-Object { $_.Version } |
+            Sort-Object Id, Version -Unique |
+            ForEach-Object { Get-BundledAnalyzers -Id $_.Id -Version $_.Version -CacheFolder $CacheFolder }
+    )
+
+    $after = Get-GitStatus -Repo $Repo
+
+    return [pscustomobject]@{
+        Repository          = $Repo
+        SelectedSdk         = $sdk
+        NuGetGlobalPackages = $cacheFolder
+        ConfigFiles         = $configFiles
+        PolicyProperties    = Get-PolicyProperties -Documents $documents
+        AnalyzerPackages    = $analyzerish
+        BundledAnalyzers    = $bundled
+        AllPackageRefs      = $refs
+        GitStatusBefore     = $before
+        GitStatusAfter      = $after
+        Mutated             = (($before -join "`n") -ne ($after -join "`n"))
+    }
+}
+
+$resolved = (Resolve-Path -LiteralPath $Path).Path
+
+# Single pruned recursive walk; everything below is derived from it.
+# $unreadable collects directories the walk could not enumerate, so "nothing found" can be
+# told apart from "not looked at" downstream.
+$unreadable = [System.Collections.Generic.List[string]]::new()
+$tree = Get-Tree -Root $resolved -Unreadable $unreadable
+foreach ($u in $unreadable) { Write-Warning "Could not enumerate '$u'; anything beneath it is UNSCANNED, not absent." }
+
+# Every repo root under the scanned path. Needed even for a single-repo run, so a repo
+# containing its own linked worktree or submodule does not absorb that child's config.
+#
+# Both operands MUST be wrapped in @(). A single-element result unrolls to a bare string,
+# and `<string> + <string>` is CONCATENATION, not array append -- which silently produced
+# one nonsense key ("<path><path>") and an empty inventory for every repo that had no
+# nested worktree.
+$allRoots = @(
+    @(Get-RepoRootsFromTree -Tree $tree) + @($resolved) | Sort-Object -Unique
+)
+
+# One pass to assign every file to its deepest owning repo.
+$filesByRepo = Group-FilesByOwningRepo -Tree $tree -RepoRoots $allRoots
+
+# Wrap in @(): PowerShell unrolls a single-element array assigned from an `if`.
+$repos = @(
+    if ($Workspace) { Get-RepoRootsFromTree -Tree $tree }
+    else { $resolved }
+)
+
+if (-not $repos) { throw "No repository found under '$resolved'." }
+
+$result = [pscustomobject]@{
+    ScannedPath  = $resolved
+    WorkspaceRun = [bool] $Workspace
+    # Non-empty means part of the tree was never read. A consumer must not report this
+    # inventory as complete while it has entries.
+    UnreadablePaths = @($unreadable)
+    RepoCount    = $repos.Count
+    Repositories = @(
+        $repos | ForEach-Object {
+            $owned = if ($filesByRepo.ContainsKey($_)) { @($filesByRepo[$_]) } else { @() }
+            Get-RepoInventory -Files $owned -Repo $_
+        }
+    )
+}
+
+$result | ConvertTo-Json -Depth 8

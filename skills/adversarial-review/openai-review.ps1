@@ -13,7 +13,7 @@
     directly, so Observatory telemetry is posted inline rather than swept
     post-hoc from Copilot session state.
 
-    Used by ~/.claude/skills/adversarial-review for Phase 1 (blind review,
+    Used by ~/.agents/skills/adversarial-review for Phase 1 (blind review,
     -DiffPath) and Phase 2 (cross-examination, -DiffPath and -FindingsPath).
     Either phase may also pass -ContextPath to supply repo files the diff
     depends on but does not contain, since this reviewer is repo-blind.
@@ -42,13 +42,25 @@
     (e.g. gpt-5.4) may differ from the canonical API model id -- verify against
     https://api.openai.com/v1/models before setting.
 
+.NOTES
+    PREFLIGHT_COMMAND: pwsh -NoProfile -Command 'exit [int][string]::IsNullOrWhiteSpace($env:OPENAI_API_KEY)'
+    PREFLIGHT_SUCCESS: exit 0. The command prints no credential value.
+
+    The inner command MUST stay single-quoted. Double-quoted, the INVOKING shell
+    expands $env:OPENAI_API_KEY before the child ever runs, so with a key set the
+    child receives `IsNullOrWhiteSpace(sk-...)` -- a ParserError, with the literal
+    key on the child's command line and therefore in process listings -- and with
+    no key set it fails overload resolution. Both states exit non-zero, so the only
+    declared OpenAI fallback was permanently reported unavailable, and it leaked the
+    credential in exactly the case where one was present. Observed on 2026-08-08:
+    double-quoted with a key set gives `ParserError ... IsNullOrWhiteSpace(sk-...)`;
+    single-quoted gives exit 0 with a key and exit 1 without.
+
 .OUTPUTS
     The model's review text on stdout. Non-zero exit code on failure.
 
 .EXAMPLE
-    pwsh -NoProfile -File openai-review.ps1 `
-        -Instruction (Get-Content brief.txt -Raw) `
-        -DiffPath review-diff.txt -Model gpt-4o
+    pwsh -NoProfile -File openai-review.ps1 -InstructionPath brief.txt -DiffPath review-diff.txt -Model gpt-4o
 #>
 [CmdletBinding()]
 param(
@@ -76,8 +88,8 @@ param(
     [string] $OutPath,
 
     # Optional. When set, the script writes a JSON sidecar with the API usage
-    # (inputTokens, outputTokens, costUsd) so the host agent can pass accurate
-    # metrics to emit-review-telemetry.ps1 rather than defaulting to zero.
+    # (inputTokens, outputTokens, costUsd, costUnknown) so the host agent can pass
+    # measured usage without presenting an absent registry price as zero.
     [string] $UsageSidecarPath
 )
 
@@ -209,44 +221,36 @@ if ([string]::IsNullOrWhiteSpace($text)) {
     exit 1
 }
 
-# --- Pricing table (shared by Observatory telemetry and usage sidecar) ------
-# USD per million tokens: @(input, output).
-# Update when new models ship or pricing changes.
-$openAiPricing = @{
-    'gpt-4o'       = @( 2.50, 10.00)
-    'gpt-4o-mini'  = @( 0.15,  0.60)
-    'o1'           = @(15.00, 60.00)
-    'o1-mini'      = @( 1.10,  4.40)
-    'o3'           = @(10.00, 40.00)
-    'o3-mini'      = @( 1.10,  4.40)
-    'o4-mini'      = @( 1.10,  4.40)
-    'gpt-5.4'      = @( 2.50, 15.00)
-    'gpt-5.4-mini' = @( 0.75,  4.50)
-    'gpt-5.5'      = @( 5.00, 30.00)
-    'gpt-5.6-luna' = @( 1.00,  6.00)
-    'gpt-5.6-terra'= @( 2.50, 15.00)
-    'gpt-5.6-sol'  = @( 5.00, 30.00)
+# --- Canonical registry pricing (shared by telemetry and usage sidecar) -----
+function Get-RegistryCost([long] $inTok, [long] $outTok) {
+    $registryPath = Join-Path (Join-Path (Split-Path $PSScriptRoot -Parent) 'model-registry') 'registry.json'
+    $priceHelper = Join-Path (Split-Path $registryPath -Parent) 'price.ps1'
+    if (-not (Test-Path -LiteralPath $registryPath)) { return $null }
+    if (-not (Test-Path -LiteralPath $priceHelper)) { return $null }
+    . $priceHelper
+    try { $registry = Get-Content -LiteralPath $registryPath -Raw | ConvertFrom-Json -AsHashtable }
+    catch { return $null }
+    if (-not $registry.models.ContainsKey($Model)) { return $null }
+    $facts = $registry.models[$Model]
+    $on = $env:MODEL_REGISTRY_EFFECTIVE_DATE ?? (Get-Date).ToUniversalTime().ToString('yyyy-MM-dd')
+    $cost = Get-ModelRegistryCost -Facts $facts -InputTokens $inTok -OutputTokens $outTok -Channel api -On $on
+    if ($null -ne $cost) { [Math]::Round($cost, 8) }
 }
 
-function Get-OpenAiCost([long] $inTok, [long] $outTok) {
-    $rateKey = ($openAiPricing.Keys |
-        Where-Object { $Model.StartsWith($_) } |
-        Sort-Object Length -Descending |
-        Select-Object -First 1)
-    $rates = $rateKey ? $openAiPricing[$rateKey] : @(0.00, 0.00)
-    [Math]::Round((($inTok * $rates[0]) + ($outTok * $rates[1])) / 1000000.0, 8)
-}
+$usage      = $response.usage
+$cached     = [long]($usage.prompt_tokens_details?.cached_tokens ?? 0)
+$inTok      = [Math]::Max(0L, [long]($usage.prompt_tokens ?? 0) - $cached)
+$outTok     = [long]($usage.completion_tokens ?? 0)
+$reasoning  = [long]($usage.completion_tokens_details?.reasoning_tokens ?? 0)
+$cost       = Get-RegistryCost $inTok $outTok
+$costUnknown = $null -eq $cost
+if ($costUnknown) { $cost = 0.0 }
 
 # --- Usage sidecar (for outcome telemetry) ----------------------------------
-# Write accurate token + cost figures so the host agent can pass real values to
-# emit-review-telemetry.ps1 instead of zeros. Bypasses the Observatory guard so
-# these figures are captured even without Observatory credentials.
+# Write measured tokens plus registry-derived cost state. Bypasses the Observatory
+# guard so these figures are captured even without Observatory credentials.
 if ($UsageSidecarPath -and $response.usage) {
-    $usage   = $response.usage
-    $cached  = [long]($usage.prompt_tokens_details?.cached_tokens ?? 0)
-    $inTok   = [Math]::Max(0L, [long]($usage.prompt_tokens ?? 0) - $cached)
-    $outTok  = [long]($usage.completion_tokens ?? 0)
-    @{ inputTokens = $inTok; outputTokens = $outTok; costUsd = (Get-OpenAiCost $inTok $outTok) } |
+    @{ inputTokens = $inTok; outputTokens = $outTok; costUsd = $cost; costUnknown = $costUnknown } |
         ConvertTo-Json -Compress |
         Set-Content -LiteralPath $UsageSidecarPath -Encoding utf8 -NoNewline
 }
@@ -258,13 +262,6 @@ if ($UsageSidecarPath -and $response.usage) {
 if ($env:OBSERVATORY_API_KEY -and $response.usage) {
     $observatoryUrl = $env:OBSERVATORY_URL ?? 'https://fpaiobs-api.azurewebsites.net'
     $sessionId      = [Guid]::NewGuid().ToString()
-    $usage          = $response.usage
-
-    $cached    = [long]($usage.prompt_tokens_details?.cached_tokens ?? 0)
-    $inTok     = [Math]::Max(0L, [long]($usage.prompt_tokens ?? 0) - $cached)
-    $outTok    = [long]($usage.completion_tokens ?? 0)
-    $reasoning = [long]($usage.completion_tokens_details?.reasoning_tokens ?? 0)
-
     if ($inTok -gt 0 -or $outTok -gt 0) {
         $obsBody = @{
             provider         = 'OpenAI'
@@ -273,12 +270,13 @@ if ($env:OBSERVATORY_API_KEY -and $response.usage) {
             outputTokens     = $outTok
             cacheReadTokens  = $cached
             cacheWriteTokens = $reasoning
-            costUsd          = (Get-OpenAiCost $inTok $outTok)
+            costUsd          = $cost
             eventKey         = "openai:$sessionId`:$Model"
             rawPayload       = (@{
                 source  = 'openai-review'
                 session = $sessionId
                 role    = 'adversarial-review external reviewer'
+                costUnknown = $costUnknown
             } | ConvertTo-Json -Compress)
         } | ConvertTo-Json -Compress
 

@@ -31,7 +31,7 @@
     so a Claude tier can pull surrounding context the diff omits; without it the
     review is fully inlined and repo-blind like the cross-vendor reviewers.
 
-    Used by ~/.claude/skills/adversarial-review for Phase 1 (blind review,
+    Used by ~/.agents/skills/adversarial-review for Phase 1 (blind review,
     -DiffPath) and Phase 2 (cross-examination, -DiffPath and -FindingsPath).
     Either phase may also pass -ContextPath to supply repo files the diff
     depends on but does not contain.
@@ -67,13 +67,15 @@
     surrounding context the diff omits. Omit for a fully-inlined, repo-blind
     review symmetric with the cross-vendor wrappers.
 
+.NOTES
+    PREFLIGHT_COMMAND: claude auth status
+    PREFLIGHT_SUCCESS: exit 0 and JSON field loggedIn is true.
+
 .OUTPUTS
     The model's review text on stdout. Non-zero exit code on failure.
 
 .EXAMPLE
-    pwsh -NoProfile -File claude-review.ps1 `
-        -Instruction (Get-Content brief.txt -Raw) `
-        -DiffPath review-diff.txt -Model sonnet
+    pwsh -NoProfile -File claude-review.ps1 -Instruction 'Review the diff.' -DiffPath review-diff.txt -Model sonnet
 #>
 [CmdletBinding()]
 param(
@@ -153,11 +155,20 @@ $scratch = Join-Path ([IO.Path]::GetTempPath()) ('claude-review-' + [Guid]::NewG
 New-Item -ItemType Directory -Path $scratch -Force | Out-Null
 $errFile = Join-Path $scratch 'stderr.txt'
 
+# stream-json, NOT text. `--output-format text` returns only the FINAL assistant
+# message. A Stop hook that forces a correction turn — e.g. hooks/unobserved-claim-stop.ps1
+# firing on a trigger word like "by construction" — therefore replaces the entire
+# review with the short correction, silently. Measured 2026-08-16: two Opus
+# adjudications came back as 1.8 KB fragments ("Rest of the report stands as
+# delivered") with the 16 KB body discarded, and it explains the same loss in run
+# 20260816T092033Z. We want those hooks firing — their corrections are good — so the
+# wrapper concatenates every assistant turn instead of suppressing the gate.
 $claudeArgs = @(
     '-p'
     '--model', $Model
-    '--output-format', 'text'
-    '--permission-mode', 'dontAsk'
+    '--output-format', 'stream-json'
+    '--verbose'
+    '--permission-mode', 'plan'
 )
 
 if ($RepoPath) {
@@ -168,11 +179,11 @@ if ($RepoPath) {
     }
     # Read-only repo access: the reviewer may read surrounding context but the
     # plan permission mode still forbids any mutation.
-    $claudeArgs += @('--add-dir', $repoResolved, '--allowedTools', 'Read', 'Grep', 'Glob')
+    $claudeArgs += @('--add-dir', $repoResolved, '--tools', 'Read,Grep,Glob')
 }
 else {
     # Fully inlined, repo-blind: nothing to read in the scratch dir.
-    $claudeArgs += @('--allowedTools', 'Read')
+    $claudeArgs += @('--tools', 'Read')
 }
 
 Push-Location -LiteralPath $scratch
@@ -191,7 +202,31 @@ if ($exitCode -ne 0) {
     exit $exitCode
 }
 
-$response = ($stdout ?? '').Trim()
+# stream-json emits one JSON object per line. Assistant turns carry
+# type=assistant with message.content[] blocks; take every text block, in order, so a
+# hook-forced correction turn APPENDS to the review instead of replacing it. A line
+# that will not parse is skipped rather than fatal: losing one frame must not lose the
+# review, which is the exact failure this replaced.
+$parts = @()
+foreach ($line in ($stdout -split "`r?`n")) {
+    if ([string]::IsNullOrWhiteSpace($line)) { continue }
+    try { $evt = $line | ConvertFrom-Json -ErrorAction Stop } catch {
+        # Warn, do not swallow. A CLI banner and a frame that lost content both land
+        # here, and silently treating them alike is the exact failure this wrapper was
+        # changed to fix. stderr is captured per reviewer, so the loss stays visible.
+        Write-Warning ("claude-review: skipped unparseable stream-json line: " +
+            $line.Substring(0, [Math]::Min(160, $line.Length)))
+        continue
+    }
+    if ($evt.type -ne 'assistant') { continue }
+    foreach ($block in @($evt.message.content)) {
+        if ($block.type -eq 'text' -and -not [string]::IsNullOrWhiteSpace($block.text)) {
+            $parts += $block.text
+        }
+    }
+}
+$response = (($parts -join "`n`n").Trim())
+
 if ([string]::IsNullOrWhiteSpace($response)) {
     Write-Error ("claude returned an empty response.`nSTDERR:`n{0}" -f $stderr)
     exit 1

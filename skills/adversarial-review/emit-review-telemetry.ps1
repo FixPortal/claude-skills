@@ -42,7 +42,7 @@
     Capped at 80 chars server-side.
 
 .PARAMETER Model
-    Model id as it appears in reviewers.json (e.g. claude-sonnet-4-6, gpt-5.4).
+    Actual invoked model id when resolvable; otherwise the configured selector.
 
 .PARAMETER InputTokens
     Input tokens used by this reviewer's Phase 1 call. Pass 0 when unknown --
@@ -70,15 +70,12 @@
     Count of ### finding blocks in this reviewer's Phase 1 output.
 
 .PARAMETER IssuesAccepted
-    Count of surviving (non-REFUTED) findings in the published report attributed
-    to this reviewer via consensus tags: [unanimous] = credit all four vendors;
-    [majority] = credit all except the named dissenter; [contested] findings
-    that survived Phase 4 as CONFIRMED or INDETERMINATE = credit all four vendors.
+    Count of this vendor's own Phase-1 findings that survive adjudication and
+    verification. Derive provenance from the pooled finding map, never from
+    consensus tags; accepted must not exceed this vendor's IssuesRaised.
 
 .EXAMPLE
-    pwsh -NoProfile -File emit-review-telemetry.ps1 `
-        -RunId 20260614T143022Z -Reviewer anthropic -Model claude-sonnet-4-6 `
-        -IssuesRaised 7 -IssuesAccepted 4
+    pwsh -NoProfile -File emit-review-telemetry.ps1 -RunId 20260614T143022Z -Reviewer anthropic -Role reviewer -Model claude-sonnet-current -IssuesRaised 7 -IssuesAccepted 4
 #>
 [CmdletBinding()]
 param(
@@ -103,6 +100,15 @@ param(
     [long]   $InputTokens      = 0,
     [long]   $OutputTokens     = 0,
     [double] $CostUsd          = 0,
+    # "Cost could not be determined" is a different fact from "cost was measured as 0",
+    # and a bare 0.0 renders identically to a genuinely free subscription-backed call.
+    #
+    # [switch], NOT [bool]. Callers invoke this through `pwsh -File`, where every argument
+    # arrives as a string, and a [bool] parameter REFUSES a string outright: "Cannot
+    # convert value System.String to type System.Boolean" - for "False", "True", "1" and
+    # "0" alike (verified 2026-08-08). A [bool] here would have hard-failed every emit
+    # call the moment a caller passed the flag.
+    [switch] $CostUnknown,
     [long]   $ReviewDurationMs = 0,
 
     # 0 = single-diff run (sent as null); a positive count flags an aggregated
@@ -126,6 +132,7 @@ $body = @{
     inputTokens      = $InputTokens
     outputTokens     = $OutputTokens
     costUsd          = $CostUsd
+    costUnknown      = [bool]$CostUnknown
     reviewDurationMs = $ReviewDurationMs
     issuesRaised     = $IssuesRaised
     issuesAccepted   = $IssuesAccepted

@@ -28,42 +28,59 @@ templates are the source of truth; the version table below pins the floor.
 
 ## Stack and versions
 
+Before selecting or changing dependencies, read
+`~/.agents/notes/npm-publishing-traps.md`. Pin a mutually compatible set from
+the lockfile evidence; do not equate each package's independent latest version
+with a resolvable stack.
+
 - **Build**: Vite (latest), `type: module`
 - **Framework**: React 19 + React Router (apps; a component library omits the router)
-- **Language**: TypeScript (latest), strict, bundler module resolution
+- **Language**: latest TypeScript supported by `typescript-eslint`, strict,
+  bundler module resolution
 - **Lint**: ESLint flat config (`eslint.config.js`), `typescript-eslint`,
   `eslint-plugin-react-hooks`, `eslint-plugin-react-refresh`,
   `eslint-plugin-sonarjs`
 - **Test**: Vitest + `@testing-library/react` + `jsdom`; coverage via
   `@vitest/coverage-v8` with thresholds
-- **Architecture tests**: ArchUnitTS (`archunit`), via a local wrapper
-- **Styling**: Tailwind (via `@tailwindcss/vite`)
+- **Architecture tests**: `archunit` (npm package), via a local wrapper
 
-Pin all deps to the latest release at scaffold time (unless a peer-dep
-constraint forbids it). The table below is the **floor** — the known-good set as
-of 2026-06; bump to current latest when scaffolding, but do not go below it.
+Pin all deps to their latest **mutually compatible** releases at scaffold time.
+The table below is the **floor** — the known-good set last amended in 2026-08;
+bump within current peer ranges when scaffolding, but do not go below it.
 
 | Package | Floor | Package | Floor |
 |---|---|---|---|
 | `vite` | ^8.0.16 | `eslint` | ^10.4.1 |
 | `react` / `react-dom` | ^19.2.7 | `@eslint/js` | ^10.0.1 |
 | `react-router` | ^8.0.1 | `typescript-eslint` | ^8.61.0 |
-| `typescript` | ^7.0.2 | `eslint-plugin-react-hooks` | ^7.1.1 |
+| `typescript` | **`~6.0.3`** (tilde, not caret) | `eslint-plugin-react-hooks` | ^7.1.1 |
 | `@vitejs/plugin-react` | ^6.0.2 | `eslint-plugin-react-refresh` | ^0.5.2 |
-| `vitest` | ^4.1.6 | `eslint-plugin-sonarjs` | ^4.0.3 |
-| `@vitest/coverage-v8` | ^4.1.8 | `globals` | ^17.6.0 |
-| `@testing-library/react` | ^16.3.2 | `@tailwindcss/vite` | ^4.3.0 |
-| `@testing-library/jest-dom` | ^6.9.1 | `tailwindcss` | ^4.2.2 |
-| `@testing-library/user-event` | ^14.6.1 | `jsdom` | ^29.1.1 |
-| **`archunit`** | **`2.3.3` (exact, no caret)** | `@types/node` | ^26 |
+| `vitest` | ^4.1.10 | `eslint-plugin-sonarjs` | ^4.0.3 |
+| `@vitest/coverage-v8` | ^4.1.10 | `globals` | ^17.6.0 |
+| `@testing-library/react` | ^16.3.2 | `@testing-library/user-event` | ^14.6.1 |
+| `@testing-library/jest-dom` | ^7.0.0 | `jsdom` | ^30.0.1 |
+| **`archunit`** | **`2.4.0` (exact, no caret)** | `@types/node` | ^24.13.3 |
+
+`typescript-eslint` 8.x currently declares TypeScript `>=4.8.4 <6.1.0`, so
+TypeScript 7 is not installable with this stack. Keep TypeScript on the latest
+6.0.x release until that peer range expands; never bypass it with
+`--legacy-peer-deps` or `--force`.
+
+**That is why the range is `~6.0.3` and not `^6.0.3`.** A caret means
+`>=6.0.3 <7.0.0`, which admits 6.1.0 — a version this same paragraph says is not
+installable — so on the day 6.1.0 publishes, every fresh scaffold fails `npm install`
+with `ERESOLVE` and the only documented recoveries are the two flags forbidden above.
+The tilde pins the 6.0.x line the peer range actually allows. Widen it when
+`typescript-eslint` widens, not before.
+
+Use Node **24.15.0 or newer on the Node 24 line** for this stack, matching the
+`engines.node` contract in `templates/package.json`. This satisfies Vite,
+jest-dom, and jsdom 30 together; verify `node --version` before install.
 
 `archunit` is pinned **exactly** — see *Architecture tests* below for why. Re-verified
-2026-07-12 against 2.3.3: `dist/src/files/index.js` still re-exports `projectFiles` via
-`fluentapi` (unchanged file across 2.3.0→2.3.3), and root `dist/index.js` is byte-identical
-between the two versions — it still `require("./src/testing/setup")` eagerly at import time,
-so the root-import-throws-under-`globals:false` behaviour the wrapper works around is
-unchanged. The only files that differ between 2.3.0 and 2.3.3 are `violation-factory.js` and
-`jasmine-adapter.js` (bugfix-shaped, unrelated to the wrapper's deep-import path).
+2026-07-27 against 2.4.0: `dist/src/files/index.js` still re-exports `projectFiles`, and
+root `dist/index.js` still `require("./src/testing/setup")` eagerly at import time, so the
+root-import-throws-under-`globals:false` behaviour the wrapper works around is unchanged.
 
 ## Project Structure
 
@@ -89,6 +106,12 @@ the layout that actually exists. Treat a feature-first migration as its own task
 
 ## Config (copy from `templates/`)
 
+Before changing Vite configuration or plugins, read
+`~/.agents/notes/web-ui-traps.md`.
+
+- `templates/package.json` — minimum dependency and script contract, including
+  `test: vitest run` and coverage. Adapt only the package name and app/library
+  dependencies; keep the toolchain mutually resolvable.
 - `templates/eslint.config.js` — flat config: `js` + `typescript-eslint` +
   react-hooks + react-refresh + the full SonarJS recommended set, all SonarJS
   rules downgraded to `warn`, noise rules off (see below). Per-area override
@@ -123,7 +146,10 @@ WHY comment), never by removing the plugin.
 
 ## Architecture tests (ArchUnitTS)
 
-ArchUnitTS (`archunit`) enforces file/folder-level architecture: directional
+Before changing ArchUnitTS configuration, read
+`~/.agents/notes/archunitts-traps.md`.
+
+`archunit` enforces file/folder-level architecture: directional
 layering and import-cycle freedom — the things review and ESLint don't catch. Two
 files, both in `templates/src/`:
 
@@ -174,6 +200,7 @@ only the wrapper changes.
 When scaffolding or normalizing a frontend, verify:
 
 - [ ] Vite + React + TypeScript project builds (`npm run build`)
+- [ ] Node is at least 24.15.0 on the Node 24 line; `package.json` carries the engine floor
 - [ ] Config copied from `templates/`; deps at/above the version floor
 - [ ] Feature-first `src/` for new projects (existing flat layout may stay this pass)
 - [ ] ESLint flat config with `typescript-eslint`, react-hooks, react-refresh
@@ -185,4 +212,4 @@ When scaffolding or normalizing a frontend, verify:
 - [ ] ArchUnitTS wired: `archunit` pinned exactly, `architecture.archunit.ts`
       wrapper copied, `architecture.spec.ts` with real `FORBIDDEN_EDGES`,
       non-vacuity proven, spec green under `npm test`
-- [ ] All deps on latest release versions
+- [ ] All deps on latest mutually compatible releases (except `archunit`, pinned exactly)

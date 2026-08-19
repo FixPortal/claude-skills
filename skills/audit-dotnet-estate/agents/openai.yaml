@@ -1,0 +1,4 @@
+interface:
+  display_name: "Audit .NET Estate"
+  short_description: "Audit .NET repositories against house standards"
+  default_prompt: "Use $audit-dotnet-estate to audit the configured .NET repository estate against current house standards."

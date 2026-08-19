@@ -1,0 +1,4 @@
+interface:
+  display_name: "Audit GitHub Estate"
+  short_description: "Audit GitHub quality and security estate"
+  default_prompt: "Use $audit-github-estate to audit the full GitHub estate and account for every quality and security surface."

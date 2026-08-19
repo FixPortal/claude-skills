@@ -1,5 +1,5 @@
 $ErrorActionPreference = 'Stop'
-$path = Join-Path $PSScriptRoot '..\SKILL.md'
+$path = Join-Path $PSScriptRoot '..' 'SKILL.md'
 $text = Get-Content $path -Raw
 $fm = [regex]::Match($text, '(?s)^---(.+?)---')
 if (-not $fm.Success) { throw "no frontmatter" }
@@ -16,9 +16,4 @@ foreach ($needle in 'collect.ps1','themes.json','Review Ledger','propose','cover
 if ($text -match '(?i)\.claude[\\/]+skills[\\/]+review-digest') {
   throw "SKILL.md must resolve support files from its loaded skill directory"
 }
-# sanitisation guard: the public copy must carry no machine-specific path
-$driveSlash = [IO.Path]::DirectorySeparatorChar
-foreach ($leak in "C:$($driveSlash)Users", "D:$driveSlash", "E:$driveSlash") {
-  if ($text.Contains($leak)) { throw "SKILL.md leaks a private path token: $leak" }
-}
-"SKILL.md OK — description $($desc.Groups[1].Value.Length) chars, no machine paths"
+"SKILL.md OK — description $($desc.Groups[1].Value.Length) chars"

@@ -1,247 +1,148 @@
 ---
 name: scaffold-tests
-description: Use when creating or normalizing .NET/C# test projects (xUnit) — adding a test project for a src/ project, scaffolding unit tests, or aligning test project structure. Triggers - add tests, create test project, scaffold unit tests, a src/ project missing its test project. .NET/C# only; for JS/TS frontend tests see scaffold-frontend.
+description: Use when creating or normalizing .NET/C# test projects (xUnit or NUnit) — adding a test project for a src/ project, scaffolding unit tests, or aligning test project structure. Triggers - add tests, create test project, scaffold unit tests, a src/ project missing its test project. .NET/C# only; for JS/TS frontend tests see scaffold-frontend.
 ---
 
 # Scaffold Tests
 
-## Overview
+Create .NET test projects that mirror `src/`, preserve the repository's framework, and defend meaningful behaviour.
 
-Create and maintain xUnit test projects that mirror the `src/` structure, using NSubstitute for mocking and AwesomeAssertions for assertions. Prioritize brevity and meaningful coverage — one well-parameterized theory replaces many redundant facts.
+## Project contract
 
-## When to Use
+- Put new projects in `tests/{ProjectName}.Tests`; preserve established names such as `.UnitTests`.
+- Use `Microsoft.NET.Sdk`, the matching `ProjectReference`, and the solution's `tests` folder.
+- With central package management, put concrete `PackageVersion` entries in `Directory.Packages.props` and versionless `PackageReference` entries in the test project.
+- Restore, build, and run the repository's real test command before declaring success.
 
-- Creating test projects for existing source projects
-- Adding tests to a project that has none
-- When asked to "add tests", "scaffold tests", or "create unit tests"
-- When a `src/` project is missing its corresponding test project under `tests/`
+## Framework decision
 
-## Test Project Structure
+Before adding a test project, inspect test `.csproj` files and `Directory.Packages.props` for `PackageReference`/`PackageVersion` entries. Use this branch:
 
-- New test projects use `tests/{ProjectName}.UnitTests`
-- When normalizing an existing repository, preserve its established test-project names
-- Test projects use `Microsoft.NET.Sdk`
-- Test projects must reference their corresponding source project via `ProjectReference`
-- Test projects are added to the solution under the `tests` solution folder
-- New `xunit.v3` test projects set `<OutputType>Exe</OutputType>` in the `.csproj`. The
-  generated executable is dual-mode: ordinary CLI invocation uses xUnit's in-process
-  console runner, while MTP consumers such as Stryker invoke the same executable with
-  `--server`. Do not add
-  `<UseMicrosoftTestingPlatformRunner>true</UseMicrosoftTestingPlatformRunner>` merely for
-  Stryker; that property only makes MTP the executable's default CLI entry point (for
-  example, so a direct `dotnet run -- --list-tests` works without `--server`). The house
-  `scaffold-ci` default is `test-runner: mtp` and consumes that `--server` path;
-  `OutputType=Exe` remains required. Keep `Microsoft.NET.Test.Sdk` +
-  `xunit.runner.visualstudio` alongside it so the VSTest path still works. Does not apply to
-  `xunit` v2 projects. Verified with xunit.v3 3.2.2, Stryker 4.16.0, and .NET SDK 10.0.204.
+| Detected framework | Add to an existing solution |
+|---|---|
+| xUnit v2 | Keep xUnit v2 and its established runner/package layout. |
+| xUnit v3 | Keep xUnit v3 and its established runner/package layout. |
+| NUnit | Keep NUnit and its established runner/package layout. |
 
-## Naming Conventions
+If there is no existing test framework, it is a new solution: use xUnit v3. Required packages for a new xUnit v3 project are `xunit.v3`, `xunit.runner.visualstudio`, `Microsoft.NET.Test.Sdk`, `NSubstitute`, and `AwesomeAssertions`, at versions compatible with the target framework. These `xunit.v3` package and layout instructions apply only to a new project with no existing test framework. New xUnit v3 projects set `<OutputType>Exe</OutputType>`; retain `Microsoft.NET.Test.Sdk` and `xunit.runner.visualstudio`, and do not set `UseMicrosoftTestingPlatformRunner` merely for Stryker.
 
-- New test project: `{ProjectName}.UnitTests`; preserve established names in existing repositories
-- Test class: `{ClassName}Tests` (e.g., `CompanyEndpointsTests`)
-- Test method: `MethodName_Scenario_ExpectedResult` (e.g., `GetDatabase_WithValidName_ReturnsCompany`)
+For an existing suite, keep its framework and runner; add `NSubstitute` and `AwesomeAssertions` if absent at target-compatible versions, without upgrading or converting either.
 
-## Test Style
+Never convert an existing suite while scaffolding.
 
-### Prefer Theory over Fact
+## Test style
 
-Use `[Theory]` with `[InlineData]` whenever a test can be parameterized — when multiple test cases differ only by input and expected output. Do not write multiple `[Fact]` methods that test the same logic with different values.
+- Name classes `{ClassName}Tests` and methods `Method_Scenario_ExpectedResult`.
+- In xUnit, prefer `[Theory]`/`[InlineData]`; in NUnit use `[Test]` for one case and `[TestCase]` for inputs.
+- Give each new test method an XML summary explaining what it validates and why the behaviour matters. Do not retrofit comments across an existing suite.
+- Test behaviour, not trivial getters or implementation details.
+- Use `using AwesomeAssertions;` and `.Should()` for every assertion. Never add `FluentAssertions` or use xUnit `Assert.*`.
+- Use NSubstitute only for interceptable, app-owned dependencies in unit tests. Integration tests use real collaborators except at genuine external boundaries.
+- Inject NodaTime `IClock`, or `TimeProvider` where NodaTime is not in play; never read static "now" in tested code.
+
+xUnit example (v2/v3 only):
 
 ```csharp
-// Preferred: one Theory covers multiple cases
-[Theory]
-[InlineData("Apple", true)]
-[InlineData("NonExistent", false)]
-public void GetByName_WithVariousNames_ReturnsExpectedResult(string name, bool shouldExist)
+using AwesomeAssertions;
+using NSubstitute;
+using System.Threading;
+using System.Threading.Tasks;
+using Xunit;
+
+public sealed class Fruit
 {
-    var result = FakeDatabase.GetFruitByName(name);
-    (result is not null).Should().Be(shouldExist);
+    public Fruit(string name) => Name = name;
+
+    public string Name { get; }
 }
 
-// Avoid: separate Facts for each input
-[Fact]
-public void GetByName_WithApple_ReturnsFruit() { /* ... */ }
-[Fact]
-public void GetByName_WithNonExistent_ReturnsNull() { /* ... */ }
+public interface IFruitCache
+{
+    Task<Fruit> GetAsync(string key, CancellationToken cancellationToken);
+}
+
+public sealed class FruitLookup
+{
+    private readonly IFruitCache _cache;
+
+    public FruitLookup(IFruitCache cache) => _cache = cache;
+
+    public Task<Fruit> FindAsync(string key, CancellationToken cancellationToken) =>
+        _cache.GetAsync(key, cancellationToken);
+}
+
+public sealed class FruitLookupTests
+{
+    /// <summary>Returns the cached fruit so callers preserve the app's cache contract.</summary>
+    [Fact]
+    public async Task FindAsync_WhenFruitExists_ReturnsCachedFruit()
+    {
+        var expected = new Fruit("Apple");
+        var cache = Substitute.For<IFruitCache>();
+        cache.GetAsync("apple", Arg.Any<CancellationToken>())
+            .Returns(Task.FromResult(expected));
+
+        var found = await new FruitLookup(cache).FindAsync("apple", CancellationToken.None);
+
+        found.Should().Be(expected);
+    }
+}
 ```
 
-### Documentation
+Do not substitute a concrete library merely to configure its extension methods: NSubstitute can only intercept virtual/interface calls. Wrap the external boundary in an existing app-owned interface when one exists; do not invent a wrapper unless production code genuinely needs that seam.
 
-Every new test method must have an XML doc comment explaining:
-1. What the test validates
-2. Why this test is a valid choice (what risk it mitigates or behavior it confirms)
+## Async and timing
 
-Do not retrofit XML comments across existing tests during repository normalization.
+Read [references/async-and-timing.md](references/async-and-timing.md) before writing async, concurrent, transport, or shutdown tests. The enforceable rules are:
 
-```csharp
-/// <summary>
-/// Verifies that the cache is consulted before the database, returning cached values
-/// when available. This ensures the caching layer is actually wired up and not bypassed.
-/// </summary>
-[Fact]
-public void GetCached_WithCachedValue_ReturnsCachedResult()
-```
+- Await a real signal or poll the real condition; never sleep and then assert.
+- Every operation that can miss completion gets one generous diagnostic hang ceiling.
+- Use xUnit `[Fact(Timeout = ...)]` only after inspecting `xunit.runner.json` and confirming conservative scheduling or that parallelization is disabled. Aggressive or unknown scheduling requires an operation-local `WaitAsync(TimeSpan)` or a token backed by `CancelAfter` instead.
+- A ceiling answers "did completion go missing?" It must not be a tight performance assertion.
+- Gate negative assertions on a later positive signal whenever possible; absence after an arbitrary delay proves nothing.
+- A duration passed into production code is configuration, not automatically a test timer.
 
-### Assertions
+## CI eligibility
 
-Use AwesomeAssertions (`.Should()`) instead of xUnit's `Assert.*`. AwesomeAssertions is the free, Apache-2.0 fork of FluentAssertions. Import it with `using AwesomeAssertions;` — the 9.x line renamed the namespace from `FluentAssertions`, though the `.Should()` API is otherwise unchanged. Do not use the `FluentAssertions` package (v8+ is commercially licensed).
+Read [references/ci-test-budgets.md](references/ci-test-budgets.md) whenever tests or test projects will run in CI. PR eligibility is a cost contract: one test gets 30 seconds, one substantive required job gets 10 minutes, and substantive PR work targets 15 aggregate runner-minutes. End-to-end, stress/load/soak, repeated concurrency, slow packaging, and compatibility matrices run weekly/manual in a structurally separate lane with a 45-minute job ceiling.
 
-```csharp
-// Preferred
-result.Should().NotBeNull();
-result!.Name.Should().Be("Apple");
-
-// Avoid
-Assert.NotNull(result);
-Assert.Equal("Apple", result.Name);
-```
-
-### Mocking
-
-Use NSubstitute for mocking dependencies:
-
-```csharp
-var cache = Substitute.For<IFusionCache>();
-cache.GetOrSet(Arg.Any<string>(), Arg.Any<Func<CancellationToken, Fruit?>>())
-    .Returns(expectedFruit);
-```
-
-NSubstitute is for **unit** tests. In integration tests use real instances, not empty
-substitutes — substitute only the genuine external boundary. For time-dependent code,
-inject NodaTime `IClock` (or .NET `TimeProvider` where NodaTime isn't in play) and supply
-a fake/fixed clock in the test rather than reading `DateTime.UtcNow` / `SystemClock.Instance`.
-
-### Async and timing
-
-Tests that exercise async or concurrent behaviour (a fill landing, a race
-resolving, a pipeline disposing, a message arriving) must be **event-driven**.
-
-**No wall-clock value inside a test body may decide whether it passes.** Not as
-a sleep, not as a ceiling, not as a "generous" bound. This is a prohibition, not
-a preference — a duration in the body measures how busy the runner was, so it
-turns load into failure. Specifically banned:
-
-| Banned in a test body | Why it fails |
-|---|---|
-| `Thread.Sleep(n)` / `await Task.Delay(n)` then assert | Races the system under test |
-| `elapsed.Should().BeLessThan(...)`, `Stopwatch` ceilings | Measures the scheduler |
-| `signal.Wait(TimeSpan)` / `.WaitAsync(TimeSpan)` asserted true | A slow runner is not a defect |
-| `Task.WhenAny(work, Task.Delay(n))` as a hang detector | Same bound, moved |
-| `while (!cond && DateTime.UtcNow < deadline)` poll loops | The deadline is the flake |
-
-The trap is that the last three *look* event-driven. They await real signals —
-and then impose a private deadline on how long the signal may take, which is the
-same defect wearing a better coat. A 2-second bound on "has the dispatcher
-started yet" is not generous; it is a bet on the scheduler, and under full-suite
-parallelism it loses.
-
-**Where the ceiling belongs: on the framework.** A test that awaits an unbounded
-signal still must not wedge the suite when the code genuinely regresses. Put
-that ceiling on the test, far above any healthy run and with no diagnostic
-meaning in between:
+When the runner contract permits a framework ceiling, keep cancellation attribution precise and fail through AwesomeAssertions:
 
 ```csharp
 private const int HangCeilingMs = 30_000;
 
 [Fact(Timeout = HangCeilingMs)]
-public async Task Shutdown_returns_while_an_uncancellable_send_is_still_in_flight()
+public async Task Shutdown_WhenSendIsBlocked_ReturnsWithoutCompletingSend()
 {
-    // Await a real signal, bounded ONLY by the test's cancellation token.
-    await sender.Entered.WaitAsync(TestContext.Current.CancellationToken);
-
-    var shutdown = RunOnDedicatedThread(() => sink.Dispose());
-    await shutdown.WaitAsync(TestContext.Current.CancellationToken);
-
-    // The assertion is a state fact, not a duration.
-    sender.CompletedSends.Should().Be(0, "shutdown did not wait for the blocked send");
-}
-
-// Polling is fine when nothing signals — but with NO deadline of its own.
-private static async Task WaitUntilAsync(Func<bool> condition)
-{
-    while (!condition())
+    try
     {
-        await Task.Delay(10, TestContext.Current.CancellationToken);
+        await sender.Entered.WaitAsync(TestContext.Current.CancellationToken);
+        await RunOnDedicatedThread(() => sink.Dispose())
+            .WaitAsync(TestContext.Current.CancellationToken);
+        sender.CompletedSends.Should().Be(0);
+    }
+    catch (OperationCanceledException)
+        when (TestContext.Current.CancellationToken.IsCancellationRequested)
+    {
+        false.Should().BeTrue("the test's diagnostic hang ceiling expired");
     }
 }
 ```
 
-Verify the ceiling actually fires before relying on it: a throwaway
-`[Fact(Timeout = 1_000)]` that awaits forever must report *"Test execution timed
-out"*, not hang the run.
+## Common mistakes
 
-**Assert a state fact, never a duration.** "Did teardown return?" is answered by
-awaiting the task, not by timing it. "Did the fill land?" is answered by the
-collection's contents. If the only way to express an invariant seems to be a
-duration, the invariant is usually "X happened while Y was still in flight" —
-express that as a counter or flag the system already exposes.
+| Mistake | Use instead |
+|---|---|
+| One fact per input | One parameterized theory |
+| `Assert.*` or `FluentAssertions` | AwesomeAssertions `.Should()` |
+| Substituting extension methods | An existing interceptable app boundary |
+| Sleep, stopwatch, or tight timeout assertions | A real signal plus a generous hang ceiling |
+| Framework timeout under aggressive/unknown scheduling | Operation-local `WaitAsync`/`CancelAfter` |
+| Empty substitutes in integration tests | Real collaborators |
+| Slow or inherently expensive coverage in PR CI | A separate weekly/manual extended-test project |
 
-**The one exception: a bound that can only degrade the test, never fail it.** A
-best-effort barrier — "wait for all eight workers to start, and proceed anyway if
-the scheduler is starved" — is allowed, because nothing is asserted on how it
-resolves: missing it makes the test less thorough, not red. Say so in a comment,
-or the next reader will copy the shape into a place where it *does* decide the
-verdict.
+## Completion check
 
-**A `TimeSpan` passed *into* the system under test is not a test timer** —
-`new Registry(disposalWaitTimeout: TimeSpan.FromMilliseconds(50))` is production
-configuration, and choosing a small value to make behaviour observable is right.
-The prohibition is on the test measuring time, not on the code being configured
-with it.
+Confirm framework, structure, test style/timing/CI, and a green restore/build/test run.
 
-**Negative assertions** ("must NOT recreate", "must NOT emit") cannot be made
-event-driven by waiting for an absence. Gate them on the nearest real signal that
-provably comes after the moment in question, assert the negative there, and state
-the residual in a comment. Never substitute a sleep for the missing signal — it
-is not more rigorous, only slower and flakier.
-
-Expose a completion hook the test can await (e.g. a `TaskCompletionSource` the
-sink signals) rather than guessing a delay. Combine with the injected clock
-above so the *passage* of time is controlled, not slept through.
-
-### Brevity
-
-- Do not write ten tests where one will do
-- One well-parameterized `[Theory]` replaces many `[Fact]` methods
-- Only test meaningful behavior — skip trivial getters/setters unless they contain logic
-- Prefer fewer, comprehensive tests over many narrow ones, provided coverage is maintained
-
-## Package Requirements
-
-All packages must be at the latest versions compatible with .NET 10:
-
-- `xunit.v3` — xUnit v3 for new solutions. When adding a test project to an existing solution, match the xUnit major version already in use (`xunit` for a v2 solution); do not mix v2 and v3.
-- `xunit.runner.visualstudio`
-- `Microsoft.NET.Test.Sdk`
-- `NSubstitute`
-- `AwesomeAssertions` — free Apache-2.0 fork of FluentAssertions; imported via `using AwesomeAssertions;` (9.x renamed the namespace). Do not use the `FluentAssertions` package (v8+ is commercially licensed).
-
-If the solution uses central package management (`Directory.Packages.props`), add `PackageVersion` entries there and use versionless `PackageReference` entries in the test project files.
-
-## Checklist
-
-When scaffolding test projects, verify:
-
-- [ ] New test projects use `tests/{Name}.UnitTests`; established names are preserved when normalizing existing repositories
-- [ ] Test projects added to solution under `tests` solution folder
-- [ ] Test projects reference their source project via `ProjectReference`
-- [ ] All required packages added (`xunit.v3`, `xunit.runner.visualstudio`, `Microsoft.NET.Test.Sdk`, `NSubstitute`, `AwesomeAssertions`); xUnit major version matches the solution
-- [ ] Packages use central package management if `Directory.Packages.props` exists
-- [ ] `[Theory]`/`[InlineData]` used instead of `[Fact]` where inputs vary
-- [ ] Each new test method has an XML doc comment explaining what and why; existing tests are not retrofitted
-- [ ] No redundant tests — brevity maintained with meaningful coverage
-- [ ] AwesomeAssertions used for all assertions (no `Assert.*`)
-- [ ] NSubstitute used for all mocking
-- [ ] Async/timing tests are event-driven: every wait is on a real signal or a poll bounded ONLY by `TestContext.Current.CancellationToken`
-- [ ] No wall-clock value in any test body decides pass/fail — no sleep-then-assert, no `Stopwatch`/`BeLessThan(TimeSpan)` ceiling, no `Wait(TimeSpan)` asserted true, no `WhenAny(work, Task.Delay(n))`, no `DateTime.UtcNow` poll deadline
-- [ ] Tests that await an unbounded signal carry a framework hang ceiling (`[Fact(Timeout = …)]`), set far above a healthy run and verified to fire
-- [ ] `xunit.v3` test projects have `<OutputType>Exe</OutputType>` set (required for the house `scaffold-ci` `test-runner: mtp` default)
-- [ ] Tests build and pass
-
-## Related skills
-
-- `audit-tests` — reads this skill's output. This skill creates/normalizes the test
-  project; `audit-tests` is a separate, read-only pass that judges whether an *existing*
-  suite actually defends the codebase's behaviour (risk-based adequacy, not coverage
-  percentage) and produces a prioritized backlog. Use `audit-tests` when the question is
-  "are these tests any good", not "scaffold me a test project".
+For adequacy review rather than scaffolding, use `audit-tests`.

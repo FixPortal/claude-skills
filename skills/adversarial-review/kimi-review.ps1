@@ -34,9 +34,13 @@
 
     Requires: the `kimi` CLI on PATH, logged in (`kimi login`).
 
+.NOTES
+    PREFLIGHT_COMMAND: kimi provider list
+    PREFLIGHT_SUCCESS: exit 0 and the configured provider line contains source=oauth.
+
 .PARAMETER Model
-    Kimi model alias. Defaults to kimi-code/kimi-for-coding (K2.7 Coding,
-    Standard tier — the CLI's own default_model). The -highspeed variant bills
+    Kimi model alias. This wrapper explicitly pins kimi-code/kimi-for-coding
+    (K2.7 Coding, Standard), independent of the user's CLI default. The -highspeed variant bills
     ~3x the credits for equivalent review output, so Standard is the credit-sane
     default. Pass -Model kimi-code/kimi-for-coding-highspeed only when speed is
     worth the 3x burn, or -Model kimi-code/k3 for the deeper 1M-context variant

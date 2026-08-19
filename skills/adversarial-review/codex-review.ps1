@@ -30,6 +30,10 @@
 
     Requires: the `codex` CLI on PATH, logged in via ChatGPT (`codex login`).
 
+.NOTES
+    PREFLIGHT_COMMAND: codex login status
+    PREFLIGHT_SUCCESS: exit 0 and output begins "Logged in using".
+
 .PARAMETER Model
     Optional. Codex model id (e.g. gpt-5-codex). Codex model ids differ from the
     Chat Completions API ids, so by default this is passed through only when it
@@ -175,24 +179,28 @@ foreach ($line in @($jsonl)) {
     } catch {}
 }
 
-# Putative cost only (subscription is flat-rate; per-token spend is ~0). Keyed on
-# the recorded model where known, else 0. USD per million tokens: @(input, output).
-$pricing = @{
-    'gpt-5-codex'  = @( 5.00, 30.00)
-    'gpt-5.6-sol'  = @( 5.00, 30.00)
-    'gpt-5.6-terra'= @( 2.50, 15.00)
-    'gpt-5.6-luna' = @( 1.00,  6.00)
-    'gpt-5.5'      = @( 5.00, 30.00)
+# Putative cost only (subscription is flat-rate; per-token spend is ~0). The
+# canonical registry owns prices; absent or unpriced models remain unknown.
+function Get-RegistryCost([long] $i, [long] $o) {
+    $registryPath = Join-Path (Join-Path (Split-Path $PSScriptRoot -Parent) 'model-registry') 'registry.json'
+    $priceHelper = Join-Path (Split-Path $registryPath -Parent) 'price.ps1'
+    if (-not (Test-Path -LiteralPath $registryPath) -or -not $Model) { return $null }
+    if (-not (Test-Path -LiteralPath $priceHelper)) { return $null }
+    . $priceHelper
+    try { $registry = Get-Content -LiteralPath $registryPath -Raw | ConvertFrom-Json -AsHashtable }
+    catch { return $null }
+    if (-not $registry.models.ContainsKey($Model)) { return $null }
+    $facts = $registry.models[$Model]
+    $on = $env:MODEL_REGISTRY_EFFECTIVE_DATE ?? (Get-Date).ToUniversalTime().ToString('yyyy-MM-dd')
+    $cost = Get-ModelRegistryCost -Facts $facts -InputTokens $i -OutputTokens $o -Channel api -On $on
+    if ($null -ne $cost) { [Math]::Round($cost, 8) }
 }
-function Get-PutativeCost([long] $i, [long] $o) {
-    $key = ($pricing.Keys | Where-Object { $Model -and $Model.StartsWith($_) } | Sort-Object Length -Descending | Select-Object -First 1)
-    $r = $key ? $pricing[$key] : @(0.0, 0.0)
-    [Math]::Round((($i * $r[0]) + ($o * $r[1])) / 1000000.0, 8)
-}
-$cost = Get-PutativeCost $inTok $outTok
+$cost = Get-RegistryCost $inTok $outTok
+$costUnknown = $null -eq $cost
+if ($costUnknown) { $cost = 0.0 }
 
 if ($UsageSidecarPath) {
-    @{ inputTokens = $inTok; outputTokens = $outTok; costUsd = $cost } |
+    @{ inputTokens = $inTok; outputTokens = $outTok; costUsd = $cost; costUnknown = $costUnknown } |
         ConvertTo-Json -Compress | Set-Content -LiteralPath $UsageSidecarPath -Encoding utf8 -NoNewline
 }
 
@@ -209,7 +217,7 @@ if ($env:OBSERVATORY_API_KEY -and ($inTok -gt 0 -or $outTok -gt 0)) {
         cacheWriteTokens = $reasoning
         costUsd          = $cost
         eventKey         = "codex:$sessionId`:$($Model ? $Model : 'default')"
-        rawPayload       = (@{ source = 'codex-review'; session = $sessionId; role = 'adversarial-review reviewer'; billing = 'subscription' } | ConvertTo-Json -Compress)
+        rawPayload       = (@{ source = 'codex-review'; session = $sessionId; role = 'adversarial-review reviewer'; billing = 'subscription'; costUnknown = $costUnknown } | ConvertTo-Json -Compress)
     } | ConvertTo-Json -Compress
     $obsReq = @{
         Uri         = "$observatoryUrl/api/events"

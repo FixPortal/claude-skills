@@ -1,0 +1,93 @@
+$ErrorActionPreference = 'Stop'
+
+$skill = Get-Content (Join-Path $PSScriptRoot '..' 'SKILL.md') -Raw
+$root = Join-Path ([IO.Path]::GetTempPath()) ('frontend-floor-' + [guid]::NewGuid().ToString('N'))
+
+# This check resolves the documented floors against the live npm registry. On a host with
+# no npm it cannot run at all - say so rather than failing the whole suite.
+if (-not (Get-Command npm -ErrorAction SilentlyContinue)) {
+    Write-Host 'SKIP: npm not on PATH; documented version floors not resolved'
+    return
+}
+
+# npm 10's arborist crashes with "Cannot read properties of null (reading 'edgesOut')"
+# (npm/cli#9787) while loading this fixture's peer set, and that crash is indistinguishable
+# from the floors themselves failing to resolve. Reproduced in node:22 - npm 10.9.8 dies on
+# the exact fixture below, npm 12.0.2 resolves it in the same image - so an npm that old
+# cannot answer the question this check asks. Say so rather than reporting a healthy floor
+# as stale. CI pins npm 12 for the same reason, so this skip should never fire there.
+#
+# The version is validated before it is trusted: [int]'' is 0 in PowerShell, so an npm that
+# fails or prints nothing would otherwise read as major 0, trip the guard below, and turn a
+# check that never ran into a green suite.
+$npmVersion = (& npm --version 2>&1 | Out-String).Trim()
+if ($LASTEXITCODE -ne 0 -or $npmVersion -notmatch '^(\d+)\.\d+\.\d+') {
+    throw "npm --version reported no usable version (exit $LASTEXITCODE): '$npmVersion'"
+}
+$npmMajor = [int]$Matches[1]
+if ($npmMajor -lt 11) {
+    Write-Host "SKIP: npm $npmMajor hits the arborist 'edgesOut' peer-set crash (npm/cli#9787); documented floors not resolved"
+    return
+}
+
+# Return the FLOOR itself - a bare version - not the documented RANGE. Scraping the cell
+# verbatim yielded '^6.0.3', and npm resolves a caret to the newest matching release, so
+# the install proved only "some 6.x works with typescript-eslint". The floor is the number
+# the table actually promises, and it is the one that goes stale silently when a peer range
+# moves under it. Pinning it exactly is the whole point of this check.
+#
+# The cell is parsed for a semver anywhere inside it, so table formatting (backticks, bold,
+# a trailing "(tilde, not caret)" note) cannot break the extraction the way an exact-cell
+# match would.
+function Get-Floor([string] $package) {
+    foreach ($row in $skill -split "`r?`n") {
+        $cells = $row -split '\|'
+        for ($index = 1; $index -lt $cells.Count - 1; $index += 2) {
+            if ($cells[$index].Trim() -ne "``$package``") { continue }
+            $cell = $cells[$index + 1]
+            $version = [regex]::Match($cell, '\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?')
+            if (-not $version.Success) { throw "No semver floor found for $package in table cell '$($cell.Trim())'" }
+            return $version.Value
+        }
+    }
+    throw "No version floor found for $package"
+}
+
+try {
+    New-Item -ItemType Directory -Path $root | Out-Null
+    [ordered]@{
+        name = 'frontend-floor-fixture'
+        private = $true
+        devDependencies = [ordered]@{
+            typescript = Get-Floor 'typescript'
+            'typescript-eslint' = Get-Floor 'typescript-eslint'
+            vitest = Get-Floor 'vitest'
+            '@vitest/coverage-v8' = Get-Floor '@vitest/coverage-v8'
+        }
+    } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $root 'package.json') -Encoding utf8
+
+    if ((Get-Floor 'vitest') -ne (Get-Floor '@vitest/coverage-v8')) {
+        throw "Vitest $(Get-Floor 'vitest') and @vitest/coverage-v8 $(Get-Floor '@vitest/coverage-v8') must share their exact peer release"
+    }
+
+    $output = & npm install --prefix $root --package-lock-only --ignore-scripts --no-audit --no-fund 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) {
+        throw "documented TypeScript/typescript-eslint floors do not resolve:`n$output"
+    }
+
+    # The documented TypeScript range must not admit a version typescript-eslint's peer
+    # range rejects. A caret does: '^6.0.3' is '>=6.0.3 <7.0.0', which includes 6.1.0 while
+    # the prose says <6.1.0 is the limit - so the scaffold breaks on the day 6.1.0 ships,
+    # and the documented recoveries are the two flags the same section forbids.
+    $tsCell = [regex]::Match($skill, '\|\s*`typescript`\s*\|\s*([^|]+)').Groups[1].Value
+    if ($tsCell -match '\^') {
+        throw "TypeScript is documented with a caret range ('$($tsCell.Trim())'); typescript-eslint peer-declares <6.1.0, so a caret admits a version that cannot install"
+    }
+
+    "scaffold-frontend version floor OK — npm resolved TypeScript $(Get-Floor 'typescript') with typescript-eslint $(Get-Floor 'typescript-eslint'), Vitest $(Get-Floor 'vitest') with @vitest/coverage-v8 $(Get-Floor '@vitest/coverage-v8')"
+}
+finally {
+    if ($root.StartsWith([IO.Path]::GetTempPath(), [StringComparison]::OrdinalIgnoreCase)) {
+        Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
