@@ -8,6 +8,10 @@
     mode. Inputs are copied to a throwaway workspace so large diffs never hit
     Windows command-line limits and the repository is not exposed by default.
 
+.NOTES
+    PREFLIGHT_COMMAND: agy models
+    PREFLIGHT_SUCCESS: exit 0 and output contains the reviewer's configured model.
+
 .OUTPUTS
     The model's review text on stdout (or -OutPath). Non-zero exit on failure.
 #>

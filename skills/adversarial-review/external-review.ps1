@@ -18,7 +18,7 @@
     document" only), so inputs are delivered as files the model reads with its
     file tool.
 
-    Used by ~/.claude/skills/adversarial-review for Phase 1 (blind review,
+    Used by ~/.agents/skills/adversarial-review for Phase 1 (blind review,
     -DiffPath) and Phase 2 (cross-examination, -DiffPath and -FindingsPath).
     Either phase may also pass -ContextPath to supply repo files the diff
     depends on but does not contain, since this reviewer never sees the repo.

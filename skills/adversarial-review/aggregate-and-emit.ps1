@@ -45,7 +45,7 @@
     Shape:
       {
         "accepted": { "anthropic": 6, "google": 3, "openai": 4 },
-        "judge": { "reviewer": "anthropic", "model": "claude-opus-4-8",
+        "judge": { "reviewer": "anthropic", "model": "resolved-model-id",
                    "inputTokens": 90000, "outputTokens": 0,
                    "costUsd": 2.7, "reviewDurationMs": 140000 }
       }
@@ -53,7 +53,7 @@
     judge row emitted (the run shows as "no judge").
 
 .EXAMPLE
-    pwsh -NoProfile -File aggregate-and-emit.ps1 -RunRoot <runRoot> -Repo your-repo -Summary 'Example Audit'
+    pwsh -NoProfile -File aggregate-and-emit.ps1 -RunRoot <runRoot> -Repo host-app -Summary 'WidgetService Final Audit'
 #>
 [CmdletBinding()]
 param(
@@ -67,6 +67,41 @@ param(
 $ErrorActionPreference = 'Stop'
 $scriptDir = Split-Path -Parent $PSCommandPath
 $emit = Join-Path $scriptDir 'emit-review-telemetry.ps1'
+$modelRegistryPath = Join-Path (Split-Path $scriptDir -Parent) 'model-registry' 'registry.json'
+$modelPriceHelper = Join-Path (Split-Path $modelRegistryPath -Parent) 'price.ps1'
+$modelPriceAvailable = Test-Path -LiteralPath $modelPriceHelper
+if ($modelPriceAvailable) { . $modelPriceHelper }
+$modelPriceOn = $env:MODEL_REGISTRY_EFFECTIVE_DATE ?? (Get-Date).ToUniversalTime().ToString('yyyy-MM-dd')
+# Mirrors run-review.ps1: a missing or corrupt registry must say so. A bare catch made
+# the two indistinguishable and left cost recomputation silently unavailable.
+$modelRegistry = if (Test-Path -LiteralPath $modelRegistryPath) {
+    try { Get-Content -LiteralPath $modelRegistryPath -Raw | ConvertFrom-Json -AsHashtable }
+    catch {
+        Write-Warning "Model registry at $modelRegistryPath is unreadable ($($_.Exception.Message)); judge/reviewer cost recomputation is unavailable and cost will be recorded as UNKNOWN."
+        $null
+    }
+} else {
+    Write-Warning "Model registry not found at $modelRegistryPath; judge/reviewer cost recomputation is unavailable and cost will be recorded as UNKNOWN."
+    $null
+}
+
+function Resolve-ModelSelector([string] $vendor, [string] $selector) {
+    if ($vendor -ne 'anthropic' -or $selector -notin @('opus', 'sonnet', 'haiku', 'fable') -or -not $modelRegistry) {
+        return $selector
+    }
+    $prefix = "claude-$selector-"
+    $match = $modelRegistry.models.GetEnumerator() |
+        Where-Object { $_.Key.StartsWith($prefix) -and $_.Value.availability.cli -eq 'available' -and -not $_.Value.retired } |
+        Sort-Object { [int]($_.Value.rank ?? [int]::MaxValue) }, Key |
+        Select-Object -First 1
+    return ($match ? [string]$match.Key : $selector)
+}
+
+function Get-RegistryCost([string] $model, [long] $inputTokens, [long] $outputTokens) {
+    if (-not $modelPriceAvailable -or -not $modelRegistry -or -not $modelRegistry.models.ContainsKey($model)) { return $null }
+    $facts = $modelRegistry.models[$model]
+    return Get-ModelRegistryCost -Facts $facts -InputTokens $inputTokens -OutputTokens $outputTokens -Channel api -On $modelPriceOn
+}
 # -ErrorAction Continue on every fatal Write-Error below: $ErrorActionPreference is
 # 'Stop', under which Write-Error throws a terminating ActionPreferenceStopException
 # and the `exit <n>` after it never runs — so each distinct exit code was dead and
@@ -237,6 +272,7 @@ foreach ($mf in $metricFiles) {
                 reviewer = $key; model = $p.model
                 inputTokens = 0L; outputTokens = 0L; costUsd = 0.0
                 reviewDurationMs = 0L; issuesRaised = 0; estimated = $false
+                costUnknown = $false
             }
         }
         $acc = $byReviewer[$key]
@@ -247,6 +283,9 @@ foreach ($mf in $metricFiles) {
         $acc.reviewDurationMs += [long]($p.reviewDurationMs ?? 0)
         $acc.issuesRaised     += [int]($p.issuesRaised       ?? 0)
         if ($p.costEstimated)  { $acc.estimated = $true }
+        # Unknown is contagious across a summed row: if any chunk's cost could not be
+        # determined, the total is a floor, not a figure.
+        if ($p.costUnknown)    { $acc.costUnknown = $true }
     }
 }
 
@@ -266,7 +305,16 @@ if (Test-Path -LiteralPath $VerdictPath) {
 # --- Emit one participant at a time --------------------------------------
 function Invoke-Emit([hashtable] $named) {
     $argList = @('-NoProfile', '-File', $emit)
-    foreach ($k in $named.Keys) { $argList += @("-$k", "$($named[$k])") }
+    foreach ($k in $named.Keys) {
+        $v = $named[$k]
+        # Booleans map to SWITCH parameters and must be rendered as a bare flag, present
+        # only when true. Under `pwsh -File` every argument is a string, and a stringified
+        # bool cannot bind to either [bool] ("Cannot convert System.String to
+        # System.Boolean") or [switch] - so "-Flag False" would fail the whole call, and
+        # would mean the opposite of what it says even if it bound.
+        if ($v -is [bool]) { if ($v) { $argList += "-$k" }; continue }
+        $argList += @("-$k", "$v")
+    }
     & pwsh @argList
     if ($LASTEXITCODE -ne 0) { Write-Warning "emit failed for $($named.Reviewer)/$($named.Role) (exit $LASTEXITCODE)" }
 }
@@ -289,26 +337,46 @@ foreach ($key in $byReviewer.Keys) {
     $named = @{
         RunId = $RunId; Reviewer = $key; Role = 'reviewer'; Model = $r.model
         InputTokens = $r.inputTokens; OutputTokens = $r.outputTokens
-        CostUsd = [Math]::Round($r.costUsd, 6); ReviewDurationMs = $r.reviewDurationMs
+        CostUsd = [Math]::Round($r.costUsd, 6); CostUnknown = [bool]$r.costUnknown
+        ReviewDurationMs = $r.reviewDurationMs
         IssuesRaised = $r.issuesRaised; IssuesAccepted = $acc; ChunkCount = $chunkCount
     }
     if ($Repo)    { $named.Repo = $Repo }
     if ($Summary) { $named.Summary = $Summary }
     Invoke-Emit $named
-    $rows += [pscustomobject]@{ Participant = "$key (reviewer)"; Model = $r.model; Raised = $r.issuesRaised; Accepted = $acc; Cost = [Math]::Round($r.costUsd,4); DurationMs = $r.reviewDurationMs; CostEst = $r.estimated }
+    $displayCost = $r.costUnknown ? 'UNKNOWN' : [string]([Math]::Round($r.costUsd,4))
+    $rows += [pscustomobject]@{ Participant = "$key (reviewer)"; Model = $r.model; Raised = $r.issuesRaised; Accepted = $acc; Cost = $displayCost; DurationMs = $r.reviewDurationMs; CostEst = $r.estimated }
 }
 
 if ($judge) {
+    $judgeInput = [long]($judge.inputTokens ?? 0)
+    $judgeOutput = [long]($judge.outputTokens ?? 0)
+    $judgeModel = Resolve-ModelSelector ([string]$judge.reviewer) ([string]$judge.model)
+    $judgeCost = [double]($judge.costUsd ?? 0)
+    $judgeCostEstimated = $true
+    # Registry pricing owns exact ids and resolved aliases alike. Incoming unknown is
+    # contagious; an absent registry price must not turn the transport zero into "free".
+    $judgeCostUnknown = [bool]($judge.costUnknown ?? $false)
+    $resolvedCost = Get-RegistryCost $judgeModel $judgeInput $judgeOutput
+    if ($null -eq $resolvedCost) {
+        Write-Warning "Judge model '$judgeModel' is absent or unpriced in $modelRegistryPath; recording cost as UNKNOWN, not zero."
+        $judgeCost = 0.0
+        $judgeCostUnknown = $true
+    } else {
+        $judgeCost = [double]$resolvedCost
+    }
     $named = @{
-        RunId = $RunId; Reviewer = $judge.reviewer; Role = 'judge'; Model = $judge.model
-        InputTokens = [long]($judge.inputTokens ?? 0); OutputTokens = [long]($judge.outputTokens ?? 0)
-        CostUsd = [Math]::Round([double]($judge.costUsd ?? 0), 6); ReviewDurationMs = [long]($judge.reviewDurationMs ?? 0)
+        RunId = $RunId; Reviewer = $judge.reviewer; Role = 'judge'; Model = $judgeModel
+        InputTokens = $judgeInput; OutputTokens = $judgeOutput
+        CostUsd = [Math]::Round($judgeCost, 6); CostUnknown = $judgeCostUnknown
+        ReviewDurationMs = [long]($judge.reviewDurationMs ?? 0)
         IssuesRaised = 0; IssuesAccepted = 0; ChunkCount = $chunkCount
     }
     if ($Repo)    { $named.Repo = $Repo }
     if ($Summary) { $named.Summary = $Summary }
     Invoke-Emit $named
-    $rows += [pscustomobject]@{ Participant = "$($judge.reviewer) (judge)"; Model = $judge.model; Raised = 0; Accepted = 0; Cost = [Math]::Round([double]($judge.costUsd ?? 0),4); DurationMs = [long]($judge.reviewDurationMs ?? 0); CostEst = $false }
+    $displayCost = $judgeCostUnknown ? 'UNKNOWN' : [string]([Math]::Round($judgeCost,4))
+    $rows += [pscustomobject]@{ Participant = "$($judge.reviewer) (judge)"; Model = $judgeModel; Raised = 0; Accepted = 0; Cost = $displayCost; DurationMs = [long]($judge.reviewDurationMs ?? 0); CostEst = $judgeCostEstimated }
 }
 
 Write-Host ""

@@ -1,0 +1,71 @@
+This review is of a NORMATIVE CORPUS, not source code. The material is the
+written instruments of an engineering system -- its constitution, models,
+procedures, records, and the reviews and resolutions that amended them. The
+diff shows the corpus as it currently stands, with every line marked as an
+addition; most of it is long-settled text, and some of it is deliberately
+frozen. Do not treat text as defective merely because it is old, formal, or
+not how you would have written it.
+
+You are reviewing it AS AN ENGINEERING SYSTEM. The question is not "is this
+prose good", nor only "do these documents agree with each other". The question
+is whether the system, executed as written, does the engineering work it
+claims to do -- and whether what it costs to run is repaid in engineering
+outcome.
+
+Read the defect classes in the brief below as their corpus analogues:
+
+- correctness / logic error -> an instrument that produces the wrong outcome
+  when followed as written: a rule whose stated procedure cannot reach its
+  stated result, a definition that admits what it exists to exclude, a
+  criterion satisfied by anything (vacuous) or by nothing (unsatisfiable).
+- broken invariant -> a property the system declares load-bearing (separation
+  of roles, an authority ordering, a gate that must precede acceptance, the
+  finality of a rendered judgement) that some other clause, procedure, or
+  recorded precedent lets through.
+- contract / API misuse -> two instruments describing the same object, role,
+  or step incompatibly; an obligation placed on a participant the corpus never
+  defines; a term used in a sense its glossary does not carry.
+- unhandled error / missing edge case -> a state the system can actually reach
+  and has no rule for: a gate that can neither pass nor fail, an obligation
+  with no discharge path, a Change that can be opened and never closed, a
+  finding with no available disposition.
+- resource / lifetime error -> an amendment, supersession, or discharge
+  recorded at one end only; a superseded instrument still cited as live; a
+  record whose declared status contradicts its own content.
+- security / authorization -> a control bypassable by following the written
+  procedure: self-review where independence is required, an authority
+  exercised without the warrant the constitution demands, an escape hatch
+  whose use is unbounded.
+
+ALSO IN SCOPE, and specific to a system of engineering. Raise these as
+findings in the same format as any other:
+
+- PROPORTION AND COST -- ceremony whose cost is not repaid in engineering
+  outcome; a control that cannot in principle catch what it is stated to
+  catch; a procedure whose burden scales the wrong way against the size or
+  risk of the Change.
+- ADEQUACY OF EVIDENCE -- a claim the corpus makes about itself (that a
+  control works, that a property was established, that a phase is complete)
+  which its own recorded evidence does not support.
+- EXECUTABILITY -- a procedure a competent operator could not run from the
+  text alone: an undefined input, an unnamed actor, a step whose completion is
+  unobservable, a judgement with no stated basis.
+- COVERAGE -- an engineering activity the system governs in name but leaves
+  with no binding instrument, and conversely an instrument that binds nothing
+  reachable.
+
+NOT defects. Do not report these:
+
+- prose style, tone, heading structure, formatting, or length;
+- deliberate constitutional choices you would have designed differently but
+  which are internally consistent and honour their own stated intent;
+- historical records that are accurate AS records but describe a state since
+  superseded, where the supersession is itself recorded;
+- work the corpus openly marks as deferred, open, or future-phase.
+
+For every finding you raise, name the concrete carriage: the Change, role,
+gate, review, or scenario in which following this corpus as written produces
+the wrong engineering outcome, or in which the cost is incurred for no
+outcome. That named scenario is what the brief's Trigger line requires, and it
+is what separates a finding from an observation. If you cannot name one, drop
+it.

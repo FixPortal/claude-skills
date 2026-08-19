@@ -16,8 +16,8 @@ $ErrorActionPreference = 'Stop'
   code under test. Telemetry env vars are cleared so emit cannot post anywhere.
 #>
 
-$batch = Join-Path $PSScriptRoot '..\batch-review.ps1'
-$agg   = Join-Path $PSScriptRoot '..\aggregate-and-emit.ps1'
+$batch = Join-Path $PSScriptRoot '..' 'batch-review.ps1'
+$agg   = Join-Path $PSScriptRoot '..' 'aggregate-and-emit.ps1'
 foreach ($s in @($batch, $agg)) {
     if (-not (Test-Path -LiteralPath $s)) { throw "script under test not found: $s" }
 }
@@ -83,12 +83,12 @@ try {
             [ordered]@{ reviewer = 'anthropic'; model = 'stale'; inputTokens = 1; outputTokens = 1
                         costUsd = 0.5; reviewDurationMs = 1; issuesRaised = 99 }
         )
-    } | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $runRoot4 'C01\metrics.json') -Encoding utf8
+    } | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $runRoot4 'C01' 'metrics.json') -Encoding utf8
 
     $m4 = Join-Path $root 'm4.json'; New-Manifest $m4 @('C01')
     & pwsh -NoProfile -File $batch -ChunkManifest $m4 -RepoPath $fakeRepo -RunRoot $runRoot4 -BatchSize 1 *>$null
     if ($LASTEXITCODE -ne 0) { throw "retry batch invocation exited $LASTEXITCODE" }
-    if (Test-Path -LiteralPath (Join-Path $runRoot4 'C01\metrics.json')) {
+    if (Test-Path -LiteralPath (Join-Path $runRoot4 'C01' 'metrics.json')) {
         throw "a retry that wrote no metrics.json must not leave the previous attempt's behind"
     }
     $row4 = @(Get-Content -LiteralPath (Join-Path $runRoot4 'batch-summary.json') -Raw | ConvertFrom-Json)[0]
@@ -116,13 +116,13 @@ try {
         $runRoot6 = Join-Path $root 'run6'
         foreach ($id in @('C01', 'C02')) {
             New-Item -ItemType Directory -Path (Join-Path $runRoot6 $id) -Force | Out-Null
-            "old-$id" | Set-Content -LiteralPath (Join-Path $runRoot6 "$id\metrics.json") -Encoding utf8
+            "old-$id" | Set-Content -LiteralPath (Join-Path $runRoot6 "$id" "metrics.json") -Encoding utf8
         }
         # The code under test round-trips raw bytes (ReadAllBytes / WriteAllBytes), so
         # compare bytes here too -- Get-Content -Raw decodes to a string first, which
         # would mask an encoding-level regression (e.g. a dropped/added BOM) that still
         # decodes to the same text.
-        $c01Path = Join-Path $runRoot6 'C01\metrics.json'
+        $c01Path = Join-Path $runRoot6 'C01' 'metrics.json'
         $c01Before = [Convert]::ToBase64String([IO.File]::ReadAllBytes($c01Path))
         $m6 = Join-Path $root 'm6.json'; New-Manifest $m6 @('C01', 'C02')
 
@@ -132,13 +132,13 @@ try {
         # fires before any deletion is even attempted and the rollback path is never
         # actually reached -- Read allows the backup to succeed while still blocking
         # Remove-Item, so this exercises the real rollback, not a different early exit.
-        $fs = [System.IO.File]::Open((Join-Path $runRoot6 'C02\metrics.json'), 'Open', 'Read', 'Read')
+        $fs = [System.IO.File]::Open((Join-Path $runRoot6 'C02' 'metrics.json'), 'Open', 'Read', 'Read')
         try {
             & pwsh -NoProfile -File $batch -ChunkManifest $m6 -RepoPath $fakeRepo -RunRoot $runRoot6 -BatchSize 1 *>$null
             $code6 = $LASTEXITCODE
         } finally { $fs.Close() }
         if ($code6 -eq 0) { throw "a locked stale metrics.json should abort the batch, exited 0" }
-        if (-not (Test-Path -LiteralPath (Join-Path $runRoot6 'C01\metrics.json'))) {
+        if (-not (Test-Path -LiteralPath (Join-Path $runRoot6 'C01' 'metrics.json'))) {
             throw "C01's stale metrics must survive an abort caused by C02's locked file, not be destroyed"
         }
         # Presence alone doesn't prove the restore is correct -- an empty or truncated
@@ -170,7 +170,7 @@ try {
         New-Item -ItemType Directory -Path $d -Force | Out-Null
         [ordered]@{
             participants = @(
-                [ordered]@{ reviewer = 'anthropic'; model = 'claude-opus-4-8'; inputTokens = 1000
+                [ordered]@{ reviewer = 'anthropic'; model = 'resolved-model-id'; inputTokens = 1000
                             outputTokens = 100; costUsd = 0.5; reviewDurationMs = 1000; issuesRaised = 8 }
             )
         } | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $d 'metrics.json') -Encoding utf8
@@ -200,10 +200,33 @@ try {
 
     # And the honest case still emits, with the run's true totals (3 chunks x 8 raised).
     New-Summary $runRoot2 @('C01', 'C02', 'C03')
+    [ordered]@{
+        accepted = [ordered]@{}
+        judge = [ordered]@{ reviewer='anthropic'; model='opus'; inputTokens=1000000; outputTokens=0
+                           costUsd=999; reviewDurationMs=1000 }
+    } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $runRoot2 'aggregate-verdict.json') -Encoding utf8
     $out = (& pwsh -NoProfile -File $agg -RunRoot $runRoot2 -Repo test-repo 2>&1 | Out-String)
     if ($LASTEXITCODE -ne 0) { throw "a summary naming every chunk must emit, exited $LASTEXITCODE`n$out" }
     if ($out -notmatch '\(3 chunks\)') { throw "ChunkCount must be the true number of chunks, got:`n$out" }
     if ($out -notmatch '\b24\b') { throw "issuesRaised must sum across chunks (3 x 8 = 24), got:`n$out" }
+    # The model-registry skill is a sibling in the private home and is not part of this
+    # public mirror, so the registry-backed judge assertion is skipped when it is absent.
+    # The stale-cost assertion below does not need the registry and still runs.
+    $registryPath = Join-Path $PSScriptRoot '..' '..' 'model-registry' 'registry.json'
+    if (Test-Path -LiteralPath $registryPath) {
+        $registry = Get-Content $registryPath -Raw | ConvertFrom-Json -AsHashtable
+        $expectedJudge = $registry.models.GetEnumerator() |
+            Where-Object { $_.Key.StartsWith('claude-opus-') -and $_.Value.availability.cli -eq 'available' -and -not $_.Value.retired } |
+            Sort-Object { [int]($_.Value.rank ?? [int]::MaxValue) }, Key |
+            Select-Object -First 1
+        if (-not $expectedJudge -or $out -notmatch [regex]::Escape($expectedJudge.Key)) {
+            throw "judge moving alias must resolve to the current registry model, got:`n$out"
+        }
+    }
+    else {
+        Write-Host "SKIP: model-registry sibling not present in this tree - $registryPath"
+    }
+    if ($out -match '\b999\b') { throw "judge must not preserve a stale caller-supplied cost for a moving alias:`n$out" }
     "aggregate-and-emit.ps1 OK — refuses a truncated summary, sums the true run when honest"
 
     # --- the summary's workDir path form must not decide what is found --------
@@ -218,7 +241,7 @@ try {
         New-Item -ItemType Directory -Path $d -Force | Out-Null
         [ordered]@{
             participants = @(
-                [ordered]@{ reviewer = 'anthropic'; model = 'claude-opus-4-8'; inputTokens = 1000
+                [ordered]@{ reviewer = 'anthropic'; model = 'resolved-model-id'; inputTokens = 1000
                             outputTokens = 100; costUsd = 0.5; reviewDurationMs = 1000; issuesRaised = 8 }
             )
         } | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $d 'metrics.json') -Encoding utf8

@@ -18,7 +18,7 @@
     a tool, the inputs are inlined into the prompt and delivered on stdin --
     fully deterministic, no file-access surface.
 
-    Used by ~/.claude/skills/adversarial-review for Phase 1 (blind review,
+    Used by ~/.agents/skills/adversarial-review for Phase 1 (blind review,
     -DiffPath) and Phase 2 (cross-examination, -DiffPath and -FindingsPath).
     Either phase may also pass -ContextPath to supply repo files the diff
     depends on but does not contain.
@@ -48,9 +48,7 @@
     The model's review text on stdout. Non-zero exit code on failure.
 
 .EXAMPLE
-    pwsh -NoProfile -File gemini-review.ps1 `
-        -Instruction (Get-Content brief.txt -Raw) `
-        -DiffPath review-diff.txt
+    pwsh -NoProfile -File gemini-review.ps1 -InstructionPath brief.txt -DiffPath review-diff.txt
 #>
 [CmdletBinding()]
 param(
@@ -187,10 +185,13 @@ $geminiArgs = @(
 # than the PAYG API key. Rename-and-restore is safe: the CLI reads the file at startup,
 # so concurrent interactive sessions are unaffected once already running.
 $oauthCreds  = Join-Path $HOME '.gemini\oauth_creds.json'
-$hiddenCreds = Join-Path $HOME '.gemini\oauth_creds.json.paused'
+$hiddenCreds = "$oauthCreds.paused.$PID.$([Guid]::NewGuid().ToString('N'))"
 $movedOAuth  = $false
 if ($env:GEMINI_API_KEY -and (Test-Path $oauthCreds)) {
-    Rename-Item $oauthCreds $hiddenCreds
+    if (Test-Path -LiteralPath $hiddenCreds) {
+        throw "Refusing to shadow Gemini OAuth credentials: backup already exists at $hiddenCreds"
+    }
+    Move-Item -LiteralPath $oauthCreds -Destination $hiddenCreds -ErrorAction Stop
     $movedOAuth = $true
 }
 
@@ -203,7 +204,12 @@ try {
 finally {
     Pop-Location
     Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
-    if ($movedOAuth) { Rename-Item $hiddenCreds $oauthCreds -ErrorAction SilentlyContinue }
+    if ($movedOAuth) {
+        if (Test-Path -LiteralPath $oauthCreds) {
+            throw "Gemini OAuth credentials reappeared during the run; restore the unique backup manually from $hiddenCreds"
+        }
+        Move-Item -LiteralPath $hiddenCreds -Destination $oauthCreds -ErrorAction Stop
+    }
 }
 
 if ($exitCode -ne 0) {

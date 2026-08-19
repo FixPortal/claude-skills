@@ -1,12 +1,11 @@
 # Adversarial Review — v2 methodology (all-frontier, subscription-backed)
 
-Status: spec for the v2 panel. Supersedes the v1 roster description in `SKILL.md`
-once implemented. This document is the contract the wrappers, `reviewers.json`,
-the driver, and the Observatory changes are built against.
+Status: implemented v2 methodology. This document records the contract shared by
+the wrappers, `reviewers.json`, the driver, and Observatory telemetry.
 
 ## Motivation
 
-Two changes make v2 possible:
+V2 is built on two changes:
 
 1. **Every frontier vendor is now reachable on a flat-rate subscription**, not
    metered API credits — Anthropic (Claude Max 20x, incl. Fable in perpetuity),
@@ -17,7 +16,7 @@ Two changes make v2 possible:
    `codex exec`) — direct analogues of `claude -p`. So a second and third
    non-Anthropic vendor can now walk the repository, not just read the diff.
 
-The v1 panel had two structural weaknesses this release targets:
+V2 addresses two structural weaknesses in the v1 panel:
 
 - **Repo-blind abstention.** Only the Anthropic reviewers had repo access; the
   cross-vendor reviewers (Gemini, OpenAI-API) abstained ("needs evidence")
@@ -48,8 +47,9 @@ The v1 panel had two structural weaknesses this release targets:
   `repoAccess:true` to enable `--add-dir` tracing, guarded only by prompt +
   git-tree. This still fixes v1's repo-blind abstention (v1 had only Anthropic
   repo-aware; v2 adds Codex).
-- **Shipped Kimi model is `kimi-code/kimi-for-coding`** (K2.7 Coding, Standard —
-  the CLI's own `default_model`). Was previously `-highspeed`, but that variant
+- **The wrapper explicitly pins `kimi-code/kimi-for-coding`** (K2.7 Coding,
+  Standard), independent of the user's current CLI default. It previously used
+  `-highspeed`, but that variant
   bills ~3x the credits for equivalent review output (the highspeed multiplier,
   not extra work), so a modest panel burned ~30% of the weekly allowance; Standard
   is the credit-sane default. `kimi-code/k3` (1M context, deeper) is a DISTINCT
@@ -74,7 +74,7 @@ Kimi is placed where it fixes v1's weaknesses, not merely as a fifth voice:
 
 ## Subscription-first, API-fallback
 
-`reviewers.json` gains a `fallbackWrapper` field. The driver resolves a
+`reviewers.json` uses a `fallbackWrapper` field. The driver resolves a
 reviewer's wrapper as: **try `wrapper` (the sub-backed CLI); on non-zero exit
 (CLI missing, not logged in, sub lapsed) fall back to `fallbackWrapper` (the API
 path) and mark the run degraded-to-API for that vendor.** The v1 API wrappers
@@ -86,24 +86,22 @@ Only OpenAI carries a fallback today (`codex` → `openai`). Google runs through
 Antigravity (`agy`) with no fallback; Kimi is also sub-only. Anthropic runs in-process
 via the Agent tool under Claude Code (no fallback needed).
 
-## Wrapper contract (unchanged, uniform)
+## Wrapper contract
 
-Every active wrapper — `claude`, `codex`, `kimi`, `agy`, `openai` — honours the same
-contract so the driver treats them interchangeably:
+Every wrapper declares this required minimum:
 
 ```
--Instruction <text> | -InstructionPath <file>   (brief; file form preferred)
--DiffPath <file>                                 (required)
--FindingsPath <file>                             (Phase 2 only)
--ContextPath "a;b;c"                             (optional; ';'-joined repo files)
+-Instruction <text>
+-DiffPath <file>
+-FindingsPath <file>
+-ContextPath "a;b;c"
 -Model <id>
--Effort <low|medium|high|xhigh|max>              (honoured where the CLI supports it)
--RepoPath <dir>                                  (optional; enables repo access where supported)
--OutPath <file>                                  (optional; else stdout)
--UsageSidecarPath <file>                         (optional; writes {inputTokens,outputTokens,costUsd})
 ```
 
-Returns the review text on stdout (or `-OutPath`), non-zero exit on failure.
+`-InstructionPath`, `-Effort`, `-RepoPath`, `-OutPath`, and
+`-UsageSidecarPath` are optional capabilities. The driver introspects them and
+passes only supported flags. Every wrapper returns review text on stdout and a
+non-zero exit on failure.
 Read-only and hermetic: `codex exec --sandbox read-only`; Kimi (`kimi -p`, which
 cannot combine with `--plan`) is run hermetically instead — throwaway scratch cwd,
 copied context, repo not in the workspace, prompt forbids mutation;
@@ -116,13 +114,16 @@ Sub-backed calls are flat-rate, so **real per-token cost is ~0**. Telemetry
 therefore reports **putative cost** (the v1 treatment for Claude), computed from
 best-effort token counts extracted from each CLI's JSON output
 (`codex exec --json`, `kimi --output-format stream-json`, `claude -p
---output-format json`). When a CLI does not surface usage (including `agy`), tokens are 0 and cost
-putative-from-0. Outcome telemetry (issuesRaised / issuesAccepted) is unaffected.
+--output-format json`). Prices come only from the canonical model registry. An
+absent price remains `costUnknown=true` through aggregation and renders as
+`UNKNOWN`; it is never presented as a measured zero. When a CLI does not surface
+usage (including `agy`), tokens remain 0. Outcome telemetry (issuesRaised /
+issuesAccepted) is unaffected.
 
 ## Phase design
 
 ### Phase 1 — blind independent find (5 reviewers, parallel)
-Unchanged in shape. New: Kimi (K) joins; X (Codex) is repo-aware, K (Kimi) is
+Kimi (K) participates; X (Codex) is repo-aware, while K (Kimi) is
 diff-blind (hermetic; fed `-ContextPath`). Gemini via Antigravity remains
 diff-blind with `-ContextPath`. Each reviewer is blind to the others.
 
@@ -133,15 +134,23 @@ Unchanged. All five attack the pooled, anonymised findings.
 Unchanged. Vendor-weighted consensus over four vendors. Judge reads the repo to
 settle contested mechanisms.
 
-### Phase 3.5 — judge-audit (NEW, opt-in)
+### Phase 3.5 — judge-audit (opt-in)
 A single cross-vendor pass (default a non-Anthropic vendor — Kimi or Codex)
 that audits the Opus judge's report for: findings silently dropped between the
 pooled set and the report, severity mis-rating vs the evidence, and consensus
 tags that don't match the vendor split. It does **not** re-review the code; it
 checks the adjudication against its own inputs. Output: a short list of
 `{findingId, issue, suggested correction}` the host folds back before Phase 4.
-Off by default (flag `-JudgeAudit`); the panel's inputs are already multi-vendor,
-so this is belt-and-braces for high-stakes runs.
+Off by default — the host runs it when the user asks, and should recommend it for
+any run whose findings will gate a merge. There is no driver flag: `run-review.ps1`
+stops at the judgment boundary, so Phases 3 onward belong to the host and a flag
+on the driver could never reach this phase.
+
+The panel's multi-vendor inputs do not make it redundant. Those cover Phases 1-2;
+Phase 3 is a single judge, and the one stage that can lose a finding outright.
+Phase 4 cannot cover for it either — it only sees findings that reached the
+report, verifies only Criticals/Highs/contested, and never inspects consensus
+tags, so dropped, demoted and mislabelled findings all pass it untouched.
 
 ### Phase 4 — verify (NOW cross-vendor pool)
 Every Critical/High and every `[contested]` finding is verified by a fresh agent
@@ -156,25 +165,26 @@ exactly as v1 (CONFIRMED / REFUTED / INDETERMINATE, additive annotations).
 
 - Per-run outcome events: one per vendor participant + judge. v2 = **5 emits**
   (anthropic merged B+F, openai, google, moonshot, + anthropic/judge).
-- `emit-review-telemetry.ps1` `-Reviewer` ValidateSet gains `moonshot`.
-- Observatory server: `Provider` enum gains `Moonshot`; the runs endpoint accepts
-  `reviewer=moonshot`; the dashboard's "complete panel" notion moves from
-  3-vendors+judge to **4-vendors+judge**, with a label/colour for Moonshot.
+- `emit-review-telemetry.ps1` `-Reviewer` ValidateSet includes `moonshot`.
+- Observatory server: `Provider` includes `Moonshot`; the runs endpoint accepts
+  `reviewer=moonshot`; dashboard completeness is **4-vendors+judge**, with a
+  label/colour for Moonshot.
 - Cost for all sub-backed vendors is putative; the dashboard already renders
   putative cost for subscription vendors.
 
 ## Files
 
-Skill (`~/.claude/skills/adversarial-review`, git-tracked under `~/.claude`):
-- NEW `codex-review.ps1`, `kimi-review.ps1`, `agy-review.ps1`
+Canonical skill (`~/.agents/skills/adversarial-review`), surfaced to other
+runtimes through their configured junctions/discovery roots:
+- `codex-review.ps1`, `kimi-review.ps1`, `agy-review.ps1`
 - `reviewers.json` — roster + `fallbackWrapper` + `moonshot` wrapper mapping
 - `emit-review-telemetry.ps1` — `moonshot` in ValidateSet
 - `run-review.ps1` — fallback resolver; roster already data-driven
-- `briefs/phase3.5-judge-audit.txt` (NEW); `briefs/phase4-verify.txt` (note the pool)
+- `briefs/phase3.5-judge-audit.txt`; `briefs/phase4-verify.txt` (note the pool)
 - `SKILL.md` — roster, prerequisites, phase procedure, telemetry, cost
 - retained legacy/API paths: `openai-review.ps1`, `gemini-review.ps1`
 
-your observability service (`<workdir>/ai-observatory`, GitHub PR):
+Your observability service (`<workdir>/ai-observatory`, GitHub PR):
 - `src/AiObservatory.Data/Entities/Provider.cs` — `+ Moonshot`
 - runs endpoint / `AdversarialReviewService.cs` — accept `moonshot`
 - `src/AiObservatory.Web/src/components/adversarialReviewGrouping*` + `api/client.ts` — 4-vendor completeness, Moonshot label/colour + test

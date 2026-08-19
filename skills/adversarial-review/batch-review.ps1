@@ -44,6 +44,12 @@
     Repo context file(s) forwarded to every chunk's reviewers (read-only
     background). Keep tight.
 
+.PARAMETER PreamblePath
+    Forwarded to every chunk's spine: a brief that replaces the default audit
+    preamble. Use `briefs/system-preamble.txt` to review a normative corpus
+    (governance instruments, specifications, procedures) as an engineering
+    system rather than as code.
+
 .PARAMETER BatchSize
     Chunks run concurrently (default 3).
 
@@ -62,6 +68,7 @@ param(
     [string] $RunRoot,
     [string] $Target = 'audit',
     [string[]] $ContextPath,
+    [string] $PreamblePath,
 
     [ValidateRange(1, [int]::MaxValue)]
     [int] $BatchSize = 3
@@ -172,13 +179,18 @@ $results = $chunks | ForEach-Object -ThrottleLimit $BatchSize -Parallel {
     $RepoPath   = $using:RepoPath
     $Target     = $using:Target
     $ContextPath = $using:ContextPath
+    $PreamblePath = $using:PreamblePath
 
     $chunkDir = Join-Path $RunRoot $c.id
     New-Item -ItemType Directory -Path $chunkDir -Force | Out-Null
 
     $a = @('-NoProfile', '-File', $spine, '-Target', $Target, '-RepoPath', $RepoPath, '-WorkDir', $chunkDir)
     if ($c.pathspec) { $a += @('-Pathspec', ((@($c.pathspec)) -join ';')) }
-    foreach ($cp in @($ContextPath | Where-Object { $_ })) { $a += @('-ContextPath', $cp) }
+    # One ';'-joined token, never a repeated flag: the spine runs under `pwsh -File`,
+    # whose binder rejects a parameter named twice ("specified more than once").
+    $ctx = @($ContextPath | Where-Object { $_ }) -join ';'
+    if ($ctx) { $a += @('-ContextPath', $ctx) }
+    if ($PreamblePath) { $a += @('-PreamblePath', $PreamblePath) }
 
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     $out = (& pwsh @a 2>&1 | Out-String)

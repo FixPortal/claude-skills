@@ -39,3 +39,12 @@ For each defect, output one finding block in exactly this format:
 Cite concrete locations. Prefer a few well-evidenced findings over a long
 speculative list. If you find no substantive defect, say so explicitly.
 Output only the findings — no preamble, no narration.
+
+Line numbers must be SOURCE-FILE lines, never offsets into the diff you were
+given. If you cannot read the repository, derive them from the diff's own
+headers: `+++ b/<path>` names the file, and the following `@@ -a,b +c,d @@` says
+the next hunk line is file line `c`; count forward from there, skipping `-`
+lines. Writing "the 603rd line of this diff" as `App.tsx:603` makes a correct
+finding look fabricated to anyone holding the actual file, and it will be
+discounted on that basis. If you are unsure of the exact line, cite the file
+plus the quoted code instead of guessing a number.

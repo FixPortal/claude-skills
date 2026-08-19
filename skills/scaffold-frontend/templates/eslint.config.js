@@ -5,7 +5,7 @@ import reactRefresh from 'eslint-plugin-react-refresh'
 import tseslint from 'typescript-eslint'
 import sonarjs from 'eslint-plugin-sonarjs'
 import { defineConfig, globalIgnores } from 'eslint/config'
-// Projects with a shared design system can spread its ESLint configs here:
+// <your-org> projects also spread the shared design-system rules:
 //   import { configs as designConfigs } from '@your-org/design/eslint'
 //   ...designConfigs(),
 

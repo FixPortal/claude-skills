@@ -1,128 +1,41 @@
 ---
 name: scaffold-minimal
-description: Use when converting traditional ASP.NET controllers to minimal APIs, or when setting up minimal API projects with OpenAPI and Scalar support. Triggers include requests to convert controllers, migrate to minimal APIs, or add OpenAPI/Scalar to a project.
+description: Use when converting controllers in an existing ASP.NET project to minimal APIs, or adding minimal endpoints, OpenAPI, or Scalar to an existing project. Triggers include "convert controllers", "migrate to minimal APIs", and "add OpenAPI/Scalar". Do not use to create a new project; run scaffold-dotnet first, then use this skill only for the minimal-API/OpenAPI delta.
 ---
 
 # Scaffold Minimal APIs
 
 ## Overview
 
-Convert traditional ASP.NET controller-based projects to minimal API style with OpenAPI and Scalar support for development builds.
+Convert or augment an existing ASP.NET application without changing its observable HTTP, authorization, binding, validation, routing, or response contract.
 
-## When to Use
+Before converting any controller, read [the complete conversion contract](references/controller-conversion.md). Do not perform a partial inventory from this summary.
 
-- Converting existing controller-based projects to minimal APIs
-- Adding OpenAPI and Scalar support to an existing minimal API project
-- When asked to "convert controllers", "use minimal APIs", or "add Scalar"
+## Procedure
 
-## Conversion Rules
+1. Inventory project-, assembly-, controller-, action-, and parameter-level behavior before editing. Include routes, methods, authorization, filters, binding, validation, content negotiation, status/results, endpoint metadata, MVC options, and pipeline dependencies.
+2. For each behavior, record the minimal-API equivalent and a parity test. If an equivalent cannot be represented and tested, stop, report it, and keep that controller plus its required MVC services.
+3. Derive effective routes exactly: combine controller/action templates, preserve absolute templates and multiple providers, expand tokens, and retain constraints, defaults, optionality, names, order, and HTTP methods. Conventional/custom routing requires inspecting runtime endpoints.
+4. Map handlers and metadata. Use a route group only when factoring a literal common prefix preserves every final route and metadata set.
+5. Compare before/after `EndpointDataSource` route tables as exact multisets. Exercise authorization, validation failures, binding sources, filters, content types, headers, and status codes.
+6. Remove a controller or MVC registration only after all dependent behavior is mapped and verified. Add OpenAPI/Scalar only in the development environment.
 
-### Controller to Endpoints
+## Load-bearing rules
 
-- Each `{Name}Controller.cs` becomes `{Name}Endpoints.cs` in an `Endpoints/` folder
-- The class becomes a `static class` named `{Name}Endpoints`
-- A single extension method is added: `static IEndpointRouteBuilder Map{Name}Endpoints(this IEndpointRouteBuilder app)`
-- Inside the method, create a route group using the original controller name with casing preserved: `var group = app.MapGroup("{Name}")`
-- Each controller action becomes a mapping on the group, using the appropriate HTTP method (`MapGet`, `MapPost`, `MapPut`, `MapDelete`, etc.)
-- Route templates from `[Http*("route")]` attributes are preserved on the group mappings
-- Constructor-injected dependencies become lambda parameters
-- The extension method returns the `IEndpointRouteBuilder` for chaining
-- Delete the `Controllers/` folder once all controllers have been converted and no files remain
+- `[Authorize]`, `[AllowAnonymous]`, filters, formatters, binding attributes, and `[ApiController]` behavior do not transfer automatically.
+- A green build is not behavioral parity.
+- Keep `app.UseAuthorization()` whenever any endpoint, controller, or pipeline behavior requires its semantics or order.
+- Remove `AddControllers()` and `MapControllers()` only when nothing retained needs them.
+- Match `Microsoft.AspNetCore.OpenApi` to the target framework major and use central package management when present.
+- Before enabling ASP.NET OpenAPI source generation, inspect direct and centrally managed `Microsoft.OpenApi` declarations; require `<3.0.0` while 3.x is incompatible.
+- Delete `Controllers/` only when every controller and ledger row is converted and verified.
 
-### Program.cs Updates
+## Compact checklist
 
-- Remove `builder.Services.AddControllers()`
-- Remove `app.UseAuthorization()` if only present for controllers (keep if other auth is configured)
-- Remove `app.MapControllers()`
-- Add `builder.Services.AddOpenApi()` in the services section
-- Add a development-only block for OpenAPI and Scalar:
-  ```csharp
-  if (app.Environment.IsDevelopment())
-  {
-      app.MapOpenApi();
-      app.MapScalarApiReference();
-  }
-  ```
-- Add `app.Map{Name}Endpoints()` for each converted endpoint class
-
-### Package Requirements
-
-- `Microsoft.AspNetCore.OpenApi` — the major version **must match the target
-  framework major version**: use the `9.x` series for `net9.0` projects and the
-  `10.x` series for `net10.0` projects. Do not use "latest" blindly — `10.x`
-  targets `net10.0` only and will not resolve on a `net9.0` project.
-- `Scalar.AspNetCore` — latest version
-- If the project uses central package management (`Directory.Packages.props`), add `PackageVersion` entries there and use versionless `PackageReference` in the project file
-- If not using central package management, add versioned `PackageReference` entries directly in the project file
-
-## Example
-
-A controller like this:
-
-```csharp
-[ApiController]
-[Route("[controller]")]
-public class CompanyController(IFusionCache cache) : ControllerBase
-{
-    [HttpGet("database/{name}")]
-    public Company? GetDatabase(string name)
-    {
-        return FakeDatabase.GetCompanyByName(name);
-    }
-
-    [HttpGet("cached/{name}")]
-    public Company? GetCached(string name)
-    {
-        return cache.GetOrSet(name, _ => FakeDatabase.GetCompanyByName(name));
-    }
-}
-```
-
-Becomes:
-
-```csharp
-public static class CompanyEndpoints
-{
-    public static IEndpointRouteBuilder MapCompanyEndpoints(this IEndpointRouteBuilder app)
-    {
-        var group = app.MapGroup("Company");
-
-        group.MapGet("database/{name}", (string name) =>
-        {
-            return FakeDatabase.GetCompanyByName(name);
-        });
-
-        group.MapGet("cached/{name}", (string name, IFusionCache cache) =>
-        {
-            return cache.GetOrSet(name, _ => FakeDatabase.GetCompanyByName(name));
-        });
-
-        return app;
-    }
-}
-```
-
-## Checklist
-
-When converting a project to minimal APIs, verify:
-
-- [ ] Each controller converted to a static endpoint class in `Endpoints/`
-- [ ] Route groups preserve original controller name casing
-- [ ] All HTTP verb mappings and route templates preserved
-- [ ] Constructor-injected dependencies moved to lambda parameters
-- [ ] `Controllers/` folder deleted if empty
-- [ ] `builder.Services.AddControllers()` removed from `Program.cs`
-- [ ] `app.MapControllers()` removed from `Program.cs`
-- [ ] `builder.Services.AddOpenApi()` added to `Program.cs`
-- [ ] `app.MapOpenApi()` and `app.MapScalarApiReference()` added in development block
-- [ ] `app.Map{Name}Endpoints()` added for each endpoint class
-- [ ] Required packages added (`Microsoft.AspNetCore.OpenApi`, `Scalar.AspNetCore`)
-- [ ] Packages use central package management if `Directory.Packages.props` exists
-- [ ] Project builds successfully
-
-## Common Mistakes
-
-- **Removing `app.UseAuthorization()` when other middleware still needs it.** Only remove it if it was there *solely* for controllers; keep it when any auth is configured — and mind its order in the pipeline.
-- **Forgetting to register an endpoint class.** Every `Map{Name}Endpoints()` must be called in `Program.cs`, or that group's routes silently 404.
-- **Exposing OpenAPI/Scalar in production.** Keep `MapOpenApi()` / `MapScalarApiReference()` inside the `IsDevelopment()` guard — don't lift them out.
-- **Hardcoding .NET 10.** Package versions track the project's target framework; on a `net9.0` project use the latest `net9.0`-compatible `Microsoft.AspNetCore.OpenApi`.
+- [ ] Behavior ledger complete before edits.
+- [ ] Unsupported behavior retained and reported.
+- [ ] Effective route/metadata multisets match.
+- [ ] Authorization, binding, validation, and response parity tested.
+- [ ] OpenAPI and Scalar are development-only.
+- [ ] Required endpoint classes are registered.
+- [ ] Build and parity tests pass.

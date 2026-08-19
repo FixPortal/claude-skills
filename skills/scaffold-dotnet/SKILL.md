@@ -7,23 +7,32 @@ description: Use when creating a new .NET project or solution, or when applying 
 
 ## Overview
 
-Apply standard .NET project and solution preferences when creating new projects or normalizing existing ones. Existing projects should be updated to match these preferences.
+Apply standard .NET project and solution preferences when creating new projects or normalizing existing ones. Existing-project normalization preserves its target frameworks and layout unless a migration is explicitly authorized.
 
 ## When to Use
 
 - Creating a new .NET solution or project from scratch
 - Adding a new project to an existing solution
-- Restructuring or normalizing an existing .NET project to match preferred conventions
+- Restructuring or normalizing an existing .NET project to match preferred conventions. For a large existing estate, consider `audit-dotnet-estate` first (read-only survey) before this skill makes edits.
 - When asked to "scaffold", "set up", or "initialize" a .NET project
+
+## When NOT to use / disambiguate
+
+- **ASP.NET Core web API created from scratch**: For a new minimal API, run
+  `scaffold-dotnet` first and then `scaffold-minimal`. Use `scaffold-minimal`
+  directly only for converting controllers or adding minimal endpoints, OpenAPI,
+  or Scalar to an existing project.
+- **Estate-wide read-only conformance audit** — use `audit-dotnet-estate`, not
+  this modifying skill.
 
 ## Preferences
 
 ### Solution Structure
 
-- Use `.slnx` format (XML-based, SDK 9+) for new solutions. Migrate existing `.sln` files with `dotnet solution <file>.sln migrate`.
+- Use `.slnx` format (XML-based, SDK 9+) for new solutions. Preserve an existing solution format unless migration is explicitly authorized.
 - `src/` folder for production projects
 - `tests/` folder for test projects
-- Existing projects must be moved into the appropriate folder
+- Preserve an existing project's layout unless relocation is explicitly authorized
 - A **Solution Items** solution folder containing:
   - `Directory.Build.props` (common project settings)
   - `Directory.Packages.props` (central package management)
@@ -38,18 +47,24 @@ Apply standard .NET project and solution preferences when creating new projects 
 
 ### Project Defaults
 
-- Target framework: `net10.0`
-- Existing projects must be updated to `net10.0`
+- New projects target `net10.0`.
+- Preserve an existing target framework (for example, an intentional `netstandard2.0` library) unless migration is explicitly authorized.
 - `Nullable`: enable
 - `ImplicitUsings`: enable
-- All NuGet packages must be updated to latest release versions that support .NET 10
+- Examples must use syntax compatible with the project's declared language version; do not assume C# 12 features.
+- Read `~/.agents/notes/dotnet-runtime-traps.md` before normalising packages.
+  Prefer the newest stable release that the target stack can restore, build,
+  and test; TFM metadata alone does not prove compatibility. Preserve documented
+  exception pins, including `Microsoft.OpenApi` 2.x with the .NET 10
+  `Microsoft.AspNetCore.OpenApi` generator, until the note's build-based
+  refutation condition passes.
 - These shared settings should be defined in `Directory.Build.props` where possible
 
 ### Date and Time
 
 New projects default to NodaTime for date/time handling (see the date/time section of the global `CLAUDE.md`). When scaffolding:
 
-- Add `NodaTime` and `NodaTime.Serialization.SystemTextJson` as `PackageVersion` entries in `Directory.Packages.props` (latest .NET 10-compatible release)
+- Add `NodaTime` and `NodaTime.Serialization.SystemTextJson` as `PackageVersion` entries in `Directory.Packages.props` (newest stable releases verified by restore, build, and test)
 - Add a `PackageReference` only to the projects that actually handle date/time — don't blanket-reference it in `Directory.Build.props`
 - Register `IClock` (`SystemClock.Instance`) in DI; never call `DateTime.UtcNow` or `SystemClock.Instance` statically. For projects that don't use NodaTime, inject .NET `TimeProvider` instead — same rule, never read the clock statically
 - Wire NodaTime JSON serialization at scaffold time so the boundary plumbing is in place from the start — `ConfigureForNodaTime(DateTimeZoneProviders.Tzdb)` on the relevant `JsonSerializerOptions` (e.g. via `ConfigureHttpJsonOptions` / `AddJsonOptions`)
@@ -57,7 +72,7 @@ New projects default to NodaTime for date/time handling (see the date/time secti
 
 ### Code Style and Analysis
 
-Code style and analyzers are delivered by a shared **`<YourOrg.CodeStyle>`** NuGet
+Code style and analyzers are delivered by the shared **`<YourOrg.CodeStyle>`** NuGet
 package (repo: `<your-org>/<your-codestyle-repo>`), **not** by copying an `.editorconfig`.
 The package ships a global AnalyzerConfig (every rule + severity), sets
 `EnforceCodeStyleInBuild=true`, and bundles `SonarAnalyzer.CSharp` (pinned). One
@@ -66,8 +81,9 @@ package version bump instead of N hand-edits to drift-prone copies.
 
 **CSharpier owns physical C# formatting** (whitespace, wrapping, and layout).
 `<YourOrg.CodeStyle>` continues to own semantic style, naming, and analyzer
-diagnostics. Use a package release that disables the competing IDE0055 formatter
-diagnostic; do not add a repository-local IDE0055 override once that release is in use.
+diagnostics; version `0.1.11` and later disables the competing IDE0055 formatter
+diagnostic. Do not add a repository-local IDE0055 override once that package
+version is in use.
 
 - Pin CSharpier `1.3.0` in `.config/dotnet-tools.json`. If the manifest already
   contains Stryker or another tool, merge the `csharpier` entry into it; never
@@ -76,7 +92,7 @@ diagnostic; do not add a repository-local IDE0055 override once that release is 
   ```json
   "csharpier": {
     "version": "1.3.0",
-    "commands": ["dotnet-csharpier"],
+    "commands": ["csharpier"],
     "rollForward": false
   }
   ```
@@ -98,17 +114,33 @@ diagnostic; do not add a repository-local IDE0055 override once that release is 
   </ItemGroup>
   ```
 
-  Do not specify a literal `Version="<latest>"` — `<latest>` is not a valid NuGet version
-  string and will fail restore. Instead, add the package without a version attribute (central
-  package management via `Directory.Packages.props` controls the version), or look up the
-  current release on NuGet.org and pin a concrete version (e.g. `Version="1.2.3"`). To pick
-  up the newest release automatically during development, run:
-  `dotnet add package <YourOrg.CodeStyle>` — this resolves and pins the latest.
+  Do not specify a literal `Version="<latest>"` — `<latest>` is not a valid NuGet
+  version. `<YourOrg.CodeStyle>` is private, so query its authenticated GitHub
+  Packages versions and select the highest stable release:
+
+  ```powershell
+  gh api -H "Accept: application/vnd.github+json" "/orgs/YourOrg/packages/nuget/YourOrg.CodeStyle/versions?per_page=100" --paginate --jq '.[].name'
+  ```
+
+  Pin that concrete result centrally in `Directory.Packages.props`:
+
+  ```xml
+  <PackageVersion Include="<YourOrg.CodeStyle>" Version="<resolved-version>" />
+  ```
+
+  Keep the versionless shared `PackageReference` in `Directory.Build.props`.
+  Do not run an unqualified project-scoped package-add command from the solution
+  root; it either fails to find a project or edits the wrong scope. If package
+  discovery or feed authentication fails, stop and report the gap rather than
+  guessing a version.
 
 - Copy a genuinely **thin formatter `.editorconfig`** to the solution root —
-  `~/.claude/resources/dotnet-thin.editorconfig`, saved as `.editorconfig`. It carries only
-  whitespace/layout settings (charset, indent, EOL, spacing, wrapping) plus the documented
-  IDE0011/IDE0049 compatibility preferences. Analyzer rules and severities still belong to
+  `~/.claude/resources/dotnet-thin.editorconfig`, saved as `.editorconfig`. It carries
+  layout primitives (charset, indentation, EOL, trimming, final newline), C#
+  max-line-length (**which CSharpier reads as its print width** — see the existing-repo
+  warning below before copying this into a formatted tree), and the documented
+  IDE0011/IDE0049 compatibility preferences.
+  CSharpier supplies its own spacing and wrapping behavior. Analyzer rules and severities still belong to
   the NuGet-shipped global config; however, `dotnet format` 10.0.204 does not activate those
   two fixers from a packaged global config alone, so their package-owned values are repeated
   locally. A bare whitespace key (`indent_size`, `charset`, `end_of_line`,
@@ -132,10 +164,55 @@ diagnostic; do not add a repository-local IDE0055 override once that release is 
   package's global config.
 - File-scoped namespaces, always-brace (IDE0011), no-redundant-parens (IDE0047), etc. are
   enforced at `error` severity — they fail the build via `EnforceCodeStyleInBuild`,
-  independent of `TreatWarningsAsErrors`. Sonar S-rules stay advisory (warning,
-  non-blocking). Do not rename existing projects.
+  independent of `TreatWarningsAsErrors`. Sonar S-rules are warning-level by default;
+  they become build-blocking when a consumer enables `TreatWarningsAsErrors`. Do not
+  rename existing projects.
 - After adding the package to an **existing** project, run `dotnet format` once to apply
   semantic rules, then run CSharpier, build, and test before committing.
+- **`max_line_length` is CSharpier's print width, not documentation.** The template states
+  `120`; CSharpier's own default is `100`. On a NEW scaffold either is fine because nothing is
+  formatted yet. On an **existing** repo, copying the template blind re-wraps every C# file
+  that was formatted at a different width — 819 files in `your-repo`, a diff
+  that buries whatever change you were actually making. Measure before you copy:
+
+  Treat only an active assignment in an applicable C# section as configured; comments and
+  examples do not count. A value under an unrelated section is not the repository's CSharpier
+  width.
+
+  ```
+  dotnet csharpier check .          # clean at the repo's current width
+  ```
+
+  Run it with the template's `120` in place. Failures mean the tree is not at 120, and you
+  have two honest options — never the third one of letting it happen by accident:
+
+  1. **Adopt 120 and reformat deliberately, in its own commit.** This is the default. The
+     template width is canonical, and a per-repo width means every later `scaffold-dotnet`
+     sync has to argue with that repository. The churn only ever gets more expensive, so take
+     it while the repo is not yet load-bearing.
+  2. **Pin the width the tree already is**, with a comment giving the reason and what would
+     justify raising it later. Correct when a reformat cannot be afforded right now — an
+     in-flight branch it would conflict with, or a review budget it would swamp.
+
+  Whenever the reformat happens — now on route 1, or later on route 2 — it is a **standalone
+  commit and its own PR**, never a side effect of adopting house style. It needs that scoping
+  for a practical reason: CodeRabbit refuses a PR over 300 files, so a whole-repo rewrap left
+  in with real changes makes the reviewable part unreviewable too.
+
+  **Validate it with a build and a full test run.** A diff comparison is supporting evidence,
+  not the gate. Stripping whitespace **and** CSharpier's dangling commas from both sides and
+  comparing byte-for-byte is a genuinely strong signal — equality over the ordered character
+  stream rules out moved `lock`/`using`/`try` scopes and reordered statements, which
+  `git diff -w` alone does not. But it is **not** proof behaviour is unchanged: stripping
+  whitespace makes it blind to whitespace inside verbatim (`@"..."`) and raw (`"""..."""`)
+  string literals, which is precisely where a real change would hide. Never report a reformat
+  as semantics-free on the strength of the diff alone.
+
+  `your-repo` took route 2 first — pinned 100 in review batch 80, with the
+  deviation documented in its own `.editorconfig` — then switched to route 1 once the cost of
+  carrying a per-repo width was understood, reformatting 516 files in **#279**.
+
+  Refuted if `dotnet csharpier check .` ever passes at both widths on the same tree.
 
 #### GitHub Packages auth (required to restore)
 
@@ -165,8 +242,8 @@ an env var — never a committed literal:
 </configuration>
 ```
 
-Use `YourOrg.*` in the source mapping, not an exact package name like `YourOrg.CodeStyle`.
-Exact matches break as soon as a second package is added (e.g. `YourOrg.CodeStyle.ArchRules`
+Use `YourOrg.*` in the source mapping, not an exact package name like `<YourOrg.CodeStyle>`.
+Exact matches break as soon as a second first-party package is added (e.g. `<YourOrg.CodeStyle>.ArchRules`
 falls through to nuget.org and fails). The wildcard covers all current and future packages from
 the private feed.
 
@@ -212,8 +289,8 @@ pre-net6 TFM, which the house default (`net10.0`) never is.
 The conversion is analyzer-enforced, not `.editorconfig`-enforced: the SDK rules
 **CA1510–CA1513** flag the verbose `if (…) throw new ArgumentNullException(…)`
 form and offer a code-fix to the helper. Their severity is set in the
-`<YourOrg.CodeStyle>` global config (advisory `warning`, matching the Sonar-S
-stance) — not in the formatter-only `.editorconfig`.
+`<YourOrg.CodeStyle>` global config (`suggestion`, non-blocking) — not in the
+formatter-only `.editorconfig`.
 
 ### Resource Files
 
@@ -237,20 +314,55 @@ different jobs — do not confuse them:
 > any project that **does** reference the package, only `dotnet-thin.editorconfig` is copied;
 > copying the full file too would duplicate every rule the package already build-enforces. When
 > house style changes: edit the master (`.editorconfig`) and mirror formatter-layout changes
-> into `dotnet-thin.editorconfig`; for analyzer rules, regenerate the package's global config
-> and release a new package version. Mirror a rule preference into the thin file only when a
-> regression test proves its fixer requires a hierarchical `.editorconfig`, and document it as
-> a compatibility entry.
+> into `dotnet-thin.editorconfig`; for analyzer rules, regenerate the package's
+> `<YourOrg.CodeStyle>.globalconfig` and release a new package version. Mirror a rule preference
+> into the thin file only when a regression test proves its fixer requires a hierarchical
+> `.editorconfig`, and document it as a compatibility entry.
+
+## Example — minimal CLI skeleton
+
+This demonstrates solution layout and repository-local formatting only. It
+intentionally omits the complete scaffold's `Directory.Build.props`,
+`Directory.Packages.props`, `.gitignore`, `nuget.config`, CodeStyle and NodaTime
+references, tests, Dependabot, CI, and Solution Items; apply the checklist and
+the named sibling skills for those surfaces.
+
+```powershell
+# 1. Create solution and layout
+#    `dotnet new sln` writes the solution file into the current directory and does
+#    not create a folder for it, so make the folder first.
+mkdir YourOrg.Example
+cd YourOrg.Example
+dotnet new sln -n YourOrg.Example
+mkdir src, tests
+
+# 2. Add repository-local formatter files
+cp ~/.claude/resources/dotnet-thin.editorconfig .editorconfig
+#    - Tool manifest. `-o .config` is required: since the .NET 10 SDK, a bare
+#      `dotnet new tool-manifest` writes ./dotnet-tools.json, not .config/dotnet-tools.json.
+dotnet new tool-manifest -o .config
+dotnet tool install csharpier --version 1.3.0
+
+# 3. Add projects and wire them in the solution
+dotnet new classlib -n YourOrg.Example.Core -o src/YourOrg.Example.Core
+dotnet sln add src/YourOrg.Example.Core/YourOrg.Example.Core.csproj
+
+# 4. Format and verify
+#    Build the .slnx the SDK created in step 1 — `dotnet new sln` emits .slnx by default.
+dotnet tool restore
+dotnet csharpier format .
+dotnet build YourOrg.Example.slnx --configuration Release
+```
 
 ## Checklist
 
 When scaffolding or normalizing a .NET project, verify:
 
-- [ ] `src/` and `tests/` folders created; projects moved accordingly
+- [ ] New solutions use `src/` and `tests/`; existing project layout is preserved unless relocation is explicitly authorized
 - [ ] Solution Items folder added with `Directory.Build.props`, `Directory.Packages.props`, `.editorconfig`, `.gitignore`, `nuget.config`
-- [ ] `.github/workflows/` folder created and added to Solution Items — wire CI via the `scaffold-ci` skill (ci.yml, mutation.yml, CodeQL)
+- [ ] `.github/workflows/` folder created and added to Solution Items — wire CI and visibility-appropriate GitHub security settings via the `scaffold-ci` skill
 - [ ] `.github/dependabot.yml` copied into place
-- [ ] All projects target `net10.0`
+- [ ] New projects target `net10.0`; existing target frameworks are preserved unless migration is explicitly authorized
 - [ ] `Nullable` and `ImplicitUsings` enabled (via `Directory.Build.props`)
 - [ ] Central package management enabled via `Directory.Packages.props`
 - [ ] `<YourOrg.CodeStyle>` added as a `PackageReference` (`PrivateAssets="all"`) in `Directory.Build.props` — brings the global config, `EnforceCodeStyleInBuild`, and bundled `SonarAnalyzer.CSharp`; do **not** add Sonar separately
@@ -258,7 +370,7 @@ When scaffolding or normalizing a .NET project, verify:
 - [ ] `nuget.config` maps the <your-org> GitHub Packages feed; `read:packages` token wired via env var (not committed)
 - [ ] NodaTime packages added to `Directory.Packages.props`; `IClock`/`TimeProvider` registered in DI; NodaTime JSON serialization wired (`ConfigureForNodaTime`)
 - [ ] Test project(s) created/normalized — see the `scaffold-tests` skill
-- [ ] All NuGet packages updated to latest .NET 10-compatible versions
+- [ ] Package versions checked against `~/.agents/notes/dotnet-runtime-traps.md` and verified by restore, build, and test; documented pins such as `Microsoft.OpenApi` 2.x preserved
 - [ ] Thin `.editorconfig` in place (copied from `~/.claude/resources/dotnet-thin.editorconfig`, not the full `~/.claude/resources/.editorconfig`); only documented formatter-compatibility preferences repeat package-owned values
 - [ ] CSharpier `1.3.0` merged into `.config/dotnet-tools.json`; `.gitattributes` and `.csharpierignore` added
 - [ ] `dotnet tool restore` and `dotnet csharpier format .` completed; initial formatting isolated from semantic changes
