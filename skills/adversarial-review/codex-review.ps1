@@ -206,8 +206,10 @@ if ($UsageSidecarPath) {
 
 # --- Observatory per-call telemetry (fire-and-forget) -----------------------
 # Vendor stays OpenAI (Codex is the OpenAI vote); cost is putative under the sub.
-if ($env:OBSERVATORY_API_KEY -and ($inTok -gt 0 -or $outTok -gt 0)) {
-    $observatoryUrl = $env:OBSERVATORY_URL ?? 'https://fpaiobs-api.azurewebsites.net'
+if ($env:OBSERVATORY_API_KEY -and $env:OBSERVATORY_URL -and ($inTok -gt 0 -or $outTok -gt 0)) {
+    # No default endpoint: the destination is deployment-specific and belongs in the
+    # environment, not in a published script. Unset means telemetry is simply not posted.
+    $observatoryUrl = $env:OBSERVATORY_URL
     $sessionId = [Guid]::NewGuid().ToString()
     $obsBody = @{
         provider         = 'OpenAI'

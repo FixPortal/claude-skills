@@ -3,10 +3,11 @@ $script = Join-Path $PSScriptRoot '..' 'collect.ps1'
 $out = Join-Path ([IO.Path]::GetTempPath()) 'review-digest-data.test.json'
 
 # Repos-root to exercise collect.ps1 against. NOTE: the sanitised public mirror
-# rewrites this to a `<repos-root>` placeholder. Guard for an un-substituted
-# `<...>` token and fail with a clear message — otherwise collect.ps1 just exits
-# non-zero on the bogus path and the "bad path exits non-zero" assertion below
-# becomes a tautology of that same failure rather than a real test.
+# rewrites this to a `<workdir>` placeholder, and the repo identifiers further down
+# to `<your-...-repo>` placeholders — substitute all of them for your own estate.
+# Guard for an un-substituted `<...>` token and fail with a clear message — otherwise
+# collect.ps1 just exits non-zero on the bogus path and the "bad path exits non-zero"
+# assertion below becomes a tautology of that same failure rather than a real test.
 $reposRoot = '<workdir>'
 if ($reposRoot -match '[<>]') {
     throw "verify-collect.ps1: `$reposRoot is still the placeholder '$reposRoot'. Set it to a real repos-root path before running this test."
@@ -39,8 +40,8 @@ if ($LASTEXITCODE -ne 0) { throw "collect.ps1 exited $LASTEXITCODE" }
 $data = Get-Content $out -Raw | ConvertFrom-Json
 
 # git side: engine must have review commits with a parsed fixer model and a last-review date
-$engine = $data | Where-Object { $_.repo -eq 'your-repo' }
-if (-not $engine) { throw "your-repo absent from output" }
+$engine = $data | Where-Object { $_.repo -eq '<your-engine-repo>' }
+if (-not $engine) { throw "<your-engine-repo> absent from output" }
 if ($engine.git.reviewCommits.Count -lt 1) { throw "engine has no review commits" }
 if (-not ($engine.git.reviewCommits | Where-Object { $_.fixerModel })) { throw "no fixer model parsed on engine" }
 if (-not $engine.git.lastReviewDate) { throw "engine missing lastReviewDate" }
@@ -69,8 +70,8 @@ if ($null -eq $engine.vault.tally.High) { throw "engine vault tally.High not par
 "collect.ps1 vault-side OK — engine panel: $($engine.vault.reviewers -join ', ') | judge: $($engine.vault.judge)"
 
 # ci-frontend uses a Markdown-table tally format; it must still parse a High count
-$cif = $data | Where-Object { $_.repo -eq 'your-repo' }
-if (-not $cif) { throw "your-repo absent" }
+$cif = $data | Where-Object { $_.repo -eq '<your-table-tally-repo>' }
+if (-not $cif) { throw "<your-table-tally-repo> absent" }
 if (-not $cif.vault.exists) { throw "ci-frontend vault not detected" }
 if ($null -eq $cif.vault.tally) { throw "ci-frontend tally not parsed (table format)" }
 if ($null -eq $cif.vault.tally.High) { throw "ci-frontend tally.High not parsed (table format)" }

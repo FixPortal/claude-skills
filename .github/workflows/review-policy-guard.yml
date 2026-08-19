@@ -184,7 +184,7 @@ jobs:
           #
           # `^[^#]*` is load-bearing, not tidiness. Without it this grep matched THIS
           # FILE'S OWN COMMENT describing the rule, so the guard failed in every repo it
-          # was installed into — caught on the fixportal-venue pilot, 2026-08-19, before
+          # was installed into — caught on the first pilot repository, 2026-08-19, before
           # the estate sweep ran. Requiring no '#' before the keyword means a line that
           # merely talks about the rule cannot trip it. The pull_request_target grep above
           # is already safe for the same reason: it anchors to line-start plus whitespace,
