@@ -259,8 +259,10 @@ if ($UsageSidecarPath -and $response.usage) {
 # Usage is in the response body directly -- no post-hoc session-state sweep.
 # Reasoning tokens (o1/o3/o4) are stored in cacheWriteTokens by convention,
 # matching the Gemini wrapper's treatment of thinking tokens.
-if ($env:OBSERVATORY_API_KEY -and $response.usage) {
-    $observatoryUrl = $env:OBSERVATORY_URL ?? 'https://fpaiobs-api.azurewebsites.net'
+if ($env:OBSERVATORY_API_KEY -and $env:OBSERVATORY_URL -and $response.usage) {
+    # No default endpoint: the destination is deployment-specific and belongs in the
+    # environment, not in a published script. Unset means telemetry is simply not posted.
+    $observatoryUrl = $env:OBSERVATORY_URL
     $sessionId      = [Guid]::NewGuid().ToString()
     if ($inTok -gt 0 -or $outTok -gt 0) {
         $obsBody = @{

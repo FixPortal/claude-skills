@@ -184,10 +184,12 @@ runtimes through their configured junctions/discovery roots:
 - `SKILL.md` — roster, prerequisites, phase procedure, telemetry, cost
 - retained legacy/API paths: `openai-review.ps1`, `gemini-review.ps1`
 
-Your observability service (`<workdir>/ai-observatory`, GitHub PR):
-- `src/AiObservatory.Data/Entities/Provider.cs` — `+ Moonshot`
-- runs endpoint / `AdversarialReviewService.cs` — accept `moonshot`
-- `src/AiObservatory.Web/src/components/adversarialReviewGrouping*` + `api/client.ts` — 4-vendor completeness, Moonshot label/colour + test
+Your observability service, wherever telemetry lands (separate repository, its own PR).
+Adding a vendor touches four places there, whatever they are called in your codebase:
+- the provider enum or lookup its data layer persists — add the new vendor
+- the runs endpoint / review service — accept the new vendor's identifier
+- the web grouping component and its API client — widen from N to N+1 vendors
+- the label and colour map, plus its test
 
 ## Non-goals / guardrails
 

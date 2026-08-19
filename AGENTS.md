@@ -9,8 +9,17 @@ repeated here.
 - Everything in this repo is world-readable. Never commit machine-specific
   paths, client names, or personal vault locations — use the established
   placeholders (`~/.claude/...`, `<vault>`, `<workdir>`, `you@example.com`,
-  `Acme`). The `verify-*.ps1` scripts fail the build on leaked Windows
-  user-profile or drive-root path tokens.
+  `Acme`, `<your-org>`). The `verify-*.ps1` scripts fail the build on leaked
+  Windows user-profile or drive-root path tokens.
+- **Sweep the whole tree, not just `skills/`, and not with a plain glob.**
+  `.github/`, `.claude/` and `.semgrep/` are dot-directories that `rg` and `**`
+  skip by default, so a sweep scoped to `skills/` reports clean while a private
+  slug sits in a workflow comment — which is exactly how one reached `main`.
+  Use an explicit path list including the dot-directories.
+- **Enumerate URLs and hostnames as their own class.** A token-list gate only
+  finds names it was told about; a deployment hostname is a leak with no token
+  in it. No published script may carry a real endpoint as a default — take it
+  from the environment and post nothing when it is unset.
 - Skills here are a sanitised subset of a larger private working set. Port
   changes one way, from the private canonical copy into this mirror; do not
   edit the public and private copies independently.
