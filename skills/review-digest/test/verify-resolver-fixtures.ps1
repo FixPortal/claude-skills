@@ -204,8 +204,11 @@ try {
     # -Command, not -File: under -File every element after `-RepoRoots <first>` binds
     # POSITIONALLY (and collect.ps1 has no positional parameters), so a multi-root argument
     # fails to bind at all.
-    $repoRootsArg = (@($fixtureRepos, $scanRoot, $fixtureRepos) | ForEach-Object { "'$_'" }) -join ','
-    & pwsh -NoProfile -Command "& '$script' -Path '$scanRoot' -OutFile '$fixtureOut' -VaultRoot '$fixtureVault' -RepoRoots $repoRootsArg" 2>$null
+    # Single-quote-escape every interpolated path: a quote in a temp path would
+    # otherwise break (or inject into) the -Command string.
+    function ConvertTo-PsQuoted([string] $v) { "'" + ($v -replace "'", "''") + "'" }
+    $repoRootsArg = (@($fixtureRepos, $scanRoot, $fixtureRepos) | ForEach-Object { ConvertTo-PsQuoted $_ }) -join ','
+    & pwsh -NoProfile -Command "& $(ConvertTo-PsQuoted $script) -Path $(ConvertTo-PsQuoted $scanRoot) -OutFile $(ConvertTo-PsQuoted $fixtureOut) -VaultRoot $(ConvertTo-PsQuoted $fixtureVault) -RepoRoots $repoRootsArg" 2>$null
     if ($LASTEXITCODE -ne 0) { throw "collect.ps1 exited $LASTEXITCODE on the fixture vault" }
     $fx = Get-Content $fixtureOut -Raw | ConvertFrom-Json
 

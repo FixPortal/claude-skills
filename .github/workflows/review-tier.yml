@@ -53,7 +53,13 @@ jobs:
           # Policy from the BASE ref via the API: no checkout at all (nothing from the
           # PR head ever lands on disk), and a head-side policy edit cannot re-tier its
           # own PR. The compare call below is API-based for the same reason.
-          policy=$(gh api "repos/$GITHUB_REPOSITORY/contents/.claude/review-policy.json?ref=$BASE_SHA" --jq '.content' | base64 --decode)
+          # Fail CLOSED when the policy cannot be read at the base SHA (renamed, deleted,
+          # or the API errors): an unclassifiable PR keeps no label only if we say so
+          # loudly here, not silently.
+          if ! policy=$(gh api "repos/$GITHUB_REPOSITORY/contents/.claude/review-policy.json?ref=$BASE_SHA" --jq '.content' 2>/dev/null | base64 --decode) || [ -z "$policy" ]; then
+            echo "::error::Could not read .claude/review-policy.json at base $BASE_SHA — refusing to tier. Failing closed."
+            exit 1
+          fi
 
           files=$(gh api "repos/$GITHUB_REPOSITORY/compare/$BASE_SHA...$HEAD_SHA" --jq '.files[].filename')
 

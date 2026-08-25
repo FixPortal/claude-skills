@@ -24,6 +24,7 @@ rule cannot be mistaken for the rule.
 Exit codes: 0 clean, 1 a hard violation, 2 the checker could not run.
 """
 
+import re
 import sys
 from pathlib import Path
 
@@ -184,8 +185,10 @@ def main():
             # no-checkout property argued in its own header comment.
             if event == "pull_request_target":
                 if path.name in TARGET_TRIGGER_NO_CHECKOUT:
-                    body = path.read_text(encoding="utf-8")
-                    if "actions/checkout" in body:
+                    # Enforced on the PARSED document, not raw text — a comment or a
+                    # string literal mentioning the action must not trip it, and a
+                    # `uses:` under any job must.
+                    if any(ref.split("@", 1)[0] == "actions/checkout" for _, ref in action_refs(document)):
                         print(
                             f"::error file={path}::Exempted from the target-context trigger ban on "
                             "the written rationale that it never checks out PR code, but it uses "
@@ -220,8 +223,9 @@ def main():
             # an unpinned third-party tag and can move after review.
             if ref.startswith("actions/"):
                 revision = ref.rsplit("@", 1)[1] if "@" in ref else ""
-                if revision.startswith("v") and revision[1:].isdigit():
-                    # Conformant -- counted only so the summary shows the split.
+                if re.fullmatch(r"v\d+(\.\d+)*", revision):
+                    # Conformant -- a vN release tag (major or dotted minor/patch).
+                    # Counted only so the summary shows the split.
                     first_party_tag += 1
                 else:
                     print(
@@ -241,8 +245,9 @@ def main():
         return 1
 
     print(
-        "Workflow hygiene: no target-context trigger, no write-all token, every third-party "
-        f"action pinned ({first_party_tag} first-party ref(s) on a major tag, conformant)."
+        "Workflow hygiene: no unexempted target-context trigger, no write-all token, "
+        "every third-party action pinned "
+        f"({first_party_tag} first-party ref(s) on a vN release tag, conformant)."
     )
     return 0
 
