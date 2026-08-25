@@ -11,3 +11,6 @@ graphify-out/
 # Keep Claude local state out while allowing the committed review policy.
 .claude/*
 !.claude/review-policy.json
+
+# Semgrep guardian MCP writes a zero-byte config here; local tool state.
+.semgrep/guardian.yml

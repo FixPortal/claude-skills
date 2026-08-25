@@ -112,7 +112,9 @@ Derive the checklist from the source skills rather than this summary. At minimum
 - applicable test-project structure, packages, runner configuration, assertions, mocking,
   and obvious timing anti-patterns from `scaffold-tests`;
 - CI conformance using `audit-ci`/`scaffold-ci`, including checks not represented by a
-  repository file such as CodeQL default setup; and
+  repository file such as CodeQL default setup — a `Fail` whose only defect is a GitHub
+  SETTING is a settings finding: it is corrected by an API/UI disposition, and never
+  justifies an empty PR; and
 - documentation conformance using `scaffold-doc`.
 
 Also evaluate conditional rules from the source skills only when repository evidence makes
@@ -197,15 +199,17 @@ single report in the final response.
 Every remediation prompt must be copy-ready for a fresh agent and contain:
 
 ```markdown
-### Remediate <repository> in one PR
+### Remediate <repository> in at most one PR
 
 Repository: <absolute path>
 Audit snapshot: <HEAD SHA>
 Findings: <all finding IDs>
 
 #### Outcome
-Resolve every listed finding in one branch and exactly one pull request for this
-repository.
+Resolve every listed finding for this repository: at most one branch and one pull
+request, opened only where the fixes produce committed changes. Findings whose only
+defect is a GitHub setting (for example CodeQL default setup) are corrected by a
+separate API/UI disposition listed below — a settings-only repository gets no PR.
 
 #### Required context
 - Read all applicable AGENTS.md files and repository documentation.
@@ -221,7 +225,8 @@ repository.
   - Acceptance: `<exact command or static check>`
 
 #### Constraints
-- One repository equals one PR, regardless of finding count.
+- At most one PR per repository, regardless of finding count, and only when committed
+  changes exist; settings-only findings are discharged by API/UI disposition instead.
 - Do not change another repository, suppress diagnostics to obtain a pass, edit the audit
   report, or perform unrelated refactoring.
 - Preserve unrelated work and follow the repository's test, commit, PR, review, and merge
@@ -229,8 +234,8 @@ repository.
 
 #### Verification and return
 Run every finding's acceptance check plus the repository's normal formatting check,
-Release build, and tests. Return the branch, commits, PR URL, finding-to-change mapping,
-verification results, and remaining blockers.
+Release build, and tests. Return the branch, commits, PR URL (when one was opened),
+finding-to-change mapping, verification results, and remaining blockers.
 ```
 
 Populate every field from evidence. Do not leave placeholders or tell the remediation
@@ -248,7 +253,7 @@ agent to rediscover what the audit already established.
 | Auditing worktrees, archives, loose projects, or vendor code | Keep the agreed Git-repository candidate boundary. |
 | Treating unavailable InspectCode or API access as pass | Mark the check `Not assessed` and the verdict `Incomplete` when required. |
 | Producing many evidence and prompt files | Produce one vault report. |
-| Generating one PR or prompt per finding | Consolidate all findings into one prompt and one PR per repository. |
+| Generating one PR or prompt per finding | Consolidate all findings into one prompt and at most one PR per repository; settings-only findings are a separate API/UI action, never an empty PR. |
 
 ## Red flags — stop
 

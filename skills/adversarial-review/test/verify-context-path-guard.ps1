@@ -89,6 +89,15 @@ try {
     Check 'one absent member of a joined token is still caught' `
         ($out -match 'Context file not found') `
         'a joined token with one missing member was accepted'
+
+    # 5. A path that legitimately CONTAINS a comma must survive as one path: the guard
+    #    tests the whole token as a path before falling back to splitting on ','.
+    $ctxComma = Join-Path $sandbox 'ctx,with-comma.md'
+    Set-Content -LiteralPath $ctxComma -Value '# comma path' -Encoding utf8
+    $out = Invoke-Spine $ctxComma
+    Check 'a context path containing a comma is not shredded' `
+        ($out -notmatch 'Context file not found') `
+        "a real path containing a comma was split: $($out.Substring(0, [Math]::Min(300, $out.Length)))"
 }
 finally {
     Remove-Item -LiteralPath $sandbox -Recurse -Force -ErrorAction SilentlyContinue
@@ -99,4 +108,7 @@ if ($failures) {
     Write-Host "verify-context-path-guard: FAILED ($($failures.Count))" -ForegroundColor Red
     exit 1
 }
+# The Invoke-Spine calls above deliberately run failing child processes; do not leak
+# their non-zero exit code as this script's own on a genuine pass.
+$global:LASTEXITCODE = 0
 Write-Host 'verify-context-path-guard: OK' -ForegroundColor Green

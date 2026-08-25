@@ -28,6 +28,9 @@ Forbid $skill 'Substitute\.For<IFusionCache>' 'Do not mock FusionCache extension
 Require $skill 'Substitute\.For<IFruitCache>' 'The mocking example must use an app-owned interceptable interface.'
 Forbid $skill '(?m)^\s*Assert\.' 'All sample assertions must use AwesomeAssertions.'
 Require $skill 'false\.Should\(\)\.BeTrue' 'The timeout diagnostic must fail through AwesomeAssertions.'
+Require $skill '(?is)xUnit v3 only.*?TestContext\.Current' 'The TestContext.Current block must be labelled xUnit v3-only.'
+Require $skill '(?is)xUnit v2.*?CancelAfter' 'The xUnit v2 equivalent must back the ceiling with CancellationTokenSource.CancelAfter.'
+Require $skill '(?is)private static Task RunOnDedicatedThread' 'RunOnDedicatedThread must be defined, not just called.'
 
 $frameworkCases = @(
     @{ Name = 'xUnit v2'; Pattern = '(?im)^\|\s*xUnit v2\s*\|.*?\bKeep\b' },

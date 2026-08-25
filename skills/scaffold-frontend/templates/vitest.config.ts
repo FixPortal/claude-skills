@@ -17,6 +17,10 @@ export default defineConfig({
       // denominator and the thresholds below pass vacuously. With the include,
       // adding a src file with no test correctly drags coverage down.
       include: ['src/**'],
+      // The default exclude drops *.{test,spec}.* but not src/test/ or the
+      // *.archunit.ts wrapper; name all three so the coverage denominator never
+      // counts test infrastructure as production source.
+      exclude: ['**/*.{test,spec}.*', 'src/test/**', 'src/**/*.archunit.*'],
       reporter: ['text', 'html'],
       // Start realistic for the project's current maturity and ratchet up over
       // time. A failing threshold should fail CI, so keep these honest. Set the

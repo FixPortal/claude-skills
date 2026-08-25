@@ -1,0 +1,82 @@
+name: Review tier
+
+# Server-side enforcement of the HIGH tier. CodeRabbit is label-triggered
+# (.coderabbit.yaml -> auto_review.labels: ["review-high"]), and the only other thing
+# applying that label was a local PR-create hook on one workstation — so a PR that
+# acquired a HIGH path on a later push was never re-tiered. This workflow classifies the
+# PR's changed paths against .claude/review-policy.json on every head change and applies
+# or removes the label to match.
+#
+# The policy is read from the PR's own head. That is safe because the policy file is
+# itself HIGH-tiered and guarded: review-policy-guard.yml fails the required "Review
+# policy intact" check if the file stops tiering its control plane HIGH.
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+    branches: [main]
+
+permissions:
+  pull-requests: write
+
+concurrency:
+  group: review-tier-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  tier:
+    name: Apply review tier label
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Classify changed paths and set the review-high label
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+
+          policy=.claude/review-policy.json
+
+          # Path list via the API, not a local diff: the checkout has fetch-depth 1 and
+          # the fork's base history is not guaranteed to be present.
+          files=$(gh api "repos/$GITHUB_REPOSITORY/compare/$BASE_SHA...$HEAD_SHA" --jq '.files[].filename')
+
+          # Any high match tiers the PR HIGH (the policy's own rule). bash case patterns
+          # match across '/', which is exactly the policy glob semantics used here.
+          high=false
+          while IFS= read -r file; do
+            [ -n "$file" ] || continue
+            while IFS= read -r pattern; do
+              # shellcheck disable=SC2254  # the pattern comes from the policy file by design
+              case "$file" in
+                $pattern) high=true ;;
+              esac
+            done < <(jq -r '.high[]' "$policy")
+            $high && break
+          done <<< "$files"
+
+          labelled=$(gh pr view "$PR_NUMBER" --json labels --jq '.labels[].name' | grep -cx 'review-high' || true)
+
+          if $high; then
+            echo "HIGH tier: at least one changed path matches the policy's high list."
+            gh label create review-high --force --description "HIGH review tier: CodeRabbit review required" >/dev/null
+            if [ "$labelled" -eq 0 ]; then
+              gh pr edit "$PR_NUMBER" --add-label review-high
+              echo "Applied the review-high label."
+            else
+              echo "The review-high label is already present."
+            fi
+          else
+            echo "Not HIGH: no changed path matches the policy's high list."
+            if [ "$labelled" -gt 0 ]; then
+              gh pr edit "$PR_NUMBER" --remove-label review-high
+              echo "Removed the review-high label."
+            fi
+          fi

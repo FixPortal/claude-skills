@@ -47,6 +47,16 @@ $linkRepo = Join-Path $fixtureRepos 'linked'
 $spacedRepo = Join-Path $fixtureRepos 'spaced repo'
 $appRepo = Join-Path $fixtureRepos 'app'
 $appOldRepo = Join-Path $fixtureRepos 'app-old'
+# Sha-resolution target reached ONLY via a quoted `scope: "<sha>..HEAD"` line - no file:/// link
+# and a folder name matching no directory, so stage 2 must tolerate the quote or it degrades
+# silently to the stage-3 name guess (which here finds nothing).
+$quotedRepo = Join-Path $fixtureRepos 'quoted-target'
+# A vault review older than the repo's own history (the OSS re-init squash shape): effectively
+# never reviewed, full-history scope, no false root-commit boundary.
+$predateRepo = Join-Path $scanRoot 'predates'
+# A .git FILE with a bogus gitdir makes every git probe fail: hasTrackedSource must come back
+# null (UNKNOWN), never a false that reads as a verified empty repo.
+$brokenRepo = Join-Path $scanRoot 'broken-git'
 
 # Emitted subsystem paths use the host separator, so assert on a normalised form rather than
 # pinning a backslash - a literal 'src\Foo' passes on Windows and fails on the runner.
@@ -71,7 +81,7 @@ function New-FixtureCommit {
 # the .git assertion), and anything thrown outside it would bypass finally and strand the
 # fixture directories on disk.
 try {
-    foreach ($r in @($linkRepo, $spacedRepo, $appRepo, $appOldRepo, $scanRepo, $scopeRepo, $markerRepo) + @($sourceFixtures | ForEach-Object path)) {
+    foreach ($r in @($linkRepo, $spacedRepo, $appRepo, $appOldRepo, $scanRepo, $scopeRepo, $markerRepo, $quotedRepo, $predateRepo) + @($sourceFixtures | ForEach-Object path)) {
         New-Item -ItemType Directory -Force -Path $r | Out-Null
         & git init --quiet $r 2>$null | Out-Null
         if ($LASTEXITCODE -ne 0) { throw "git init failed (exit $LASTEXITCODE) for fixture repo '$r'" }
@@ -98,6 +108,19 @@ try {
 
     New-FixtureCommit -Repo $markerRepo -File 'README.md' -Subject 'chore: initial fixture' | Out-Null
     New-FixtureCommit -Repo $markerRepo -File 'notes.md' -Subject 'fix(review): record follow-up' | Out-Null
+
+    # Subjects carry the repo name: identical subject+content+timestamp would produce the SAME
+    # commit sha in every fixture repo, and the sha-resolution fixture below then matches
+    # multiple repos (correctly reported ambiguous) instead of resolving uniquely.
+    $quotedBaseSha = New-FixtureCommit -Repo $quotedRepo -File 'README.md' -Subject 'chore: initial quoted-target fixture'
+    New-FixtureCommit -Repo $quotedRepo -File 'src/Reviewed.cs' -Subject 'feat: quoted-target reviewed change' | Out-Null
+
+    New-FixtureCommit -Repo $predateRepo -File 'README.md' -Subject 'chore: squashed initial import' | Out-Null
+    New-FixtureCommit -Repo $predateRepo -File 'src/Main.cs' -Subject 'feat: post-squash work' | Out-Null
+
+    # Not in the git-init loop: the point is that .git is a FILE whose gitdir resolves nowhere.
+    New-Item -ItemType Directory -Force -Path $brokenRepo | Out-Null
+    Set-Content -LiteralPath (Join-Path $brokenRepo '.git') -Value 'gitdir: /nonexistent-fixture-target'
     foreach ($fixture in $sourceFixtures) {
         New-FixtureCommit -Repo $fixture.path -File $fixture.file -Subject "feat: add $($fixture.name)" | Out-Null
     }
@@ -150,6 +173,26 @@ try {
         'date: 2030-01-01', "scope: `"$scopeBaseSha..$scopeReviewedTip`"", 'reviewers: [Fixture]', '---', '', '# Fixture', ''
     ) | Set-Content (Join-Path $scopeRun '_index.md')
 
+    # Same quoted scope shape, but in a vault-ONLY folder so it flows through
+    # Resolve-VaultTarget's own raw-text re-parse (stage 2) rather than Get-VaultData's
+    # quote-stripped reviewScope - the two paths must tolerate the quote equally.
+    $quotedScopeRun = Join-Path $fixtureVault 'zz-fixture-quoted-scope' '20300101T000000Z'
+    New-Item -ItemType Directory -Force -Path $quotedScopeRun | Out-Null
+    @(
+        '---', 'project: zz-fixture-quoted-scope', 'review-type: adversarial-review',
+        'date: 2030-01-01', "scope: `"$quotedBaseSha..HEAD`"", 'reviewers: [Fixture]', '---', '', '# Fixture', ''
+    ) | Set-Content (Join-Path $quotedScopeRun '_index.md')
+    @('# Fixture report', '', 'Prose-only report with no file link at all.', '') |
+        Set-Content (Join-Path $quotedScopeRun 'report.md')
+
+    # Review date (and run-folder timestamp) older than every fixture commit: the squash shape.
+    $predateRun = Join-Path $fixtureVault 'predates' '20200101T000000Z'
+    New-Item -ItemType Directory -Force -Path $predateRun | Out-Null
+    @(
+        '---', 'project: predates', 'review-type: adversarial-review',
+        'date: 2020-01-01', 'reviewers: [Fixture]', '---', '', '# Fixture', ''
+    ) | Set-Content (Join-Path $predateRun '_index.md')
+
     # Scan a temp root, not the estate: that is what makes this runnable on CI. -RepoRoots is
     # pinned too - it defaults to real estate paths, so on a developer machine the live
     # repositories would enter the SHA and name-search candidate lists and the
@@ -181,6 +224,36 @@ try {
     if (-not $markerOnly.git.effectiveNeverReviewed) { throw "git-marker without strict batch evidence must be effectively never reviewed" }
     if (-not $markerOnly.git.neverReviewed) { throw "cleared false marker boundary must also set neverReviewed=true" }
     if ($markerOnly.git.sinceReviewCount -ne 2) { throw "effectively never-reviewed marker fixture must use full-history scope (2 commits), got '$($markerOnly.git.sinceReviewCount)'" }
+    # SKILL.md contracts daysSinceReview as null when never reviewed; a cleared git-marker still
+    # carries lastReviewDate, and a number here would dress an unreviewed repo up as fresh.
+    if ($null -ne $markerOnly.git.daysSinceReview) { throw "never-reviewed repo must report daysSinceReview=null, got '$($markerOnly.git.daysSinceReview)'" }
+
+    # Vault review predating the repo's history (the squash shape): effectively never reviewed,
+    # boundary cleared, scope = full history (2 commits) - not rootSha..HEAD, which would omit
+    # everything the squash introduced.
+    $pre = $fx | Where-Object { $_.repo -eq 'predates' }
+    if (-not $pre) { throw "fixture 'predates' produced no row" }
+    if ($pre.git.boundarySource -ne 'vault-predates-history') { throw "predates fixture boundarySource should be 'vault-predates-history', got '$($pre.git.boundarySource)'" }
+    if (-not $pre.git.vaultPredatesHistory) { throw "predates fixture must set vaultPredatesHistory=true" }
+    if (-not $pre.git.effectiveNeverReviewed) { throw "a vault review older than the repo's history must be effectively never reviewed" }
+    if (-not $pre.git.neverReviewed) { throw "vault-predates-history must also set neverReviewed=true" }
+    if ($pre.git.boundarySha) { throw "vault-predates-history must clear the root-commit boundary, got '$($pre.git.boundarySha)'" }
+    if ($pre.git.sinceReviewCount -ne 2) { throw "predates fixture must use full-history scope (2 commits), got '$($pre.git.sinceReviewCount)'" }
+    if ($null -ne $pre.git.daysSinceReview) { throw "never-reviewed predates fixture must report daysSinceReview=null, got '$($pre.git.daysSinceReview)'" }
+
+    # A quoted scope line must survive Resolve-VaultTarget's raw-text stage 2: no file:/// link,
+    # no name match, so only the sha can place it.
+    $qscope = $fx | Where-Object { $_.repo -eq 'zz-fixture-quoted-scope' }
+    if (-not $qscope) { throw "fixture 'zz-fixture-quoted-scope' produced no row" }
+    if ($qscope.unresolved) { throw "a quoted scope sha must resolve through Resolve-VaultTarget stage 2 - the raw re-parse is not quote-tolerant" }
+    if ($qscope.resolvedPath -ne $quotedRepo) { throw "quoted-scope fixture resolved to '$($qscope.resolvedPath)', expected '$quotedRepo'" }
+
+    # A failing git probe is UNKNOWN (null), never a verified-empty $false.
+    $broken = $fx | Where-Object { $_.repo -eq 'broken-git' }
+    if (-not $broken) { throw "fixture 'broken-git' produced no row" }
+    $htsProp = $broken.PSObject.Properties['hasTrackedSource']
+    if ($null -eq $htsProp) { throw "broken-git row is missing hasTrackedSource entirely" }
+    if ($null -ne $htsProp.Value) { throw "a failed ls-files probe must yield hasTrackedSource=null (UNKNOWN), got '$($htsProp.Value)'" }
 
     foreach ($fixture in $sourceFixtures) {
         $source = $fx | Where-Object { $_.repo -eq $fixture.name }

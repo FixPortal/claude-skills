@@ -176,3 +176,7 @@ finally {
         Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
+
+# The fail-closed python child above is asserted, not fatal — clear its native status so
+# a caller that checks $LASTEXITCODE after a PASS does not read the child's failure.
+$global:LASTEXITCODE = 0

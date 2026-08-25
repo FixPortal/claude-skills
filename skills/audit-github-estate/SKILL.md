@@ -99,7 +99,7 @@ configuration IDs are not durable policy. Set the public configuration as the
 default for public repositories. No paid security configuration should be the
 default for, or attached to, private/internal repositories.
 
-Before inspecting or changing any repository's Code Quality setup, establish the
+Before changing any repository's Code Quality setup, establish the
 organization or enterprise **Repository access** selection, enforcement, and
 displayed billing impact. Record the current cost authorization. Treat any
 organization-level access or repository setup that enables Code Quality without
@@ -114,9 +114,13 @@ enforcement toggle, and the displayed figure; their answer, dated, is the eviden
 Do not make a repository-level Code Quality change until that control and its approval
 are known. If the user has not answered, that is a **stated evidence gap**, not a
 blocker on the whole run: record `Code Quality org access: UNVERIFIED (UI-only,
-awaiting operator)`, skip only the Code Quality mutations, and complete every other
-surface. A hard precondition with no way to discharge it would otherwise stall an
-estate audit indefinitely, or — worse — get silently assumed.
+awaiting operator)`, skip only the Code Quality mutations and the paid-analysis
+queries, and complete every other surface. Read-only setup inspection
+(`GET /repos/{owner}/{repo}/code-quality/setup`) is still performed in this state, so
+every repository reports its effective `state` — otherwise a mandatory control would
+go unread while the audit presents as complete. A hard precondition with no way to
+discharge it would otherwise stall an estate audit indefinitely, or — worse — get
+silently assumed.
 The default compliant organization state is **No repositories** with **Enforce
 access** on. An approved paid exception uses **Selected repositories** containing
 exactly the approved repositories, also with enforcement on. Treat `Let repositories
@@ -174,9 +178,12 @@ Inventory each repository before changing anything:
   policy.
 - Dependabot alerts, dependency graph, security updates, and updater runs.
   **Reconcile those alerts against open Dependabot PRs by invoking
-  `audit-dependabot-coverage`** rather than reimplementing it here. An open alert that
-  nothing is acting on is a finding in its own right, and it is invisible to every
-  configuration check: on 2026-08-08 a high-severity nanoid advisory on
+  `audit-dependabot-coverage`** rather than reimplementing it here. Invoke it with
+  `-GraceHours 0`: its default grace window would silently drop unmatched alerts
+  younger than it, and this phase must distinguish zero open items from pending
+  evidence — every unmatched alert enters the per-repository ledger itself. An open
+  alert that nothing is acting on is a finding in its own right, and it is invisible
+  to every configuration check: on 2026-08-08 a high-severity nanoid advisory on
   `your-repo` went four days with no PR because Dependabot reached a wrong
   verdict, while security updates were enabled, unpaused and correctly configured
   throughout. See `~/.agents/notes/npm-publishing-traps.md` trap 16.

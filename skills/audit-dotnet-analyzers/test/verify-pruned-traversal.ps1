@@ -40,3 +40,8 @@ finally {
 }
 
 Write-Host 'Pruned traversal verification passed.'
+
+# The inventory child runs git inside a fixture with an empty .git — asserted, not
+# fatal. Clear its native status so a caller that checks $LASTEXITCODE after a PASS does
+# not read the child's failure.
+$global:LASTEXITCODE = 0

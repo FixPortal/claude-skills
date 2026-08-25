@@ -9,10 +9,11 @@
 
     The Copilot agent is constrained to a read-only analysis call: the shell
     and write tools are denied, built-in MCP servers are disabled, and
-    repository custom instructions are not loaded. File access is whitelisted
-    (--add-dir) to only the directories holding the input files. The agent can
-    read those inputs and emit text -- nothing is executed and nothing is
-    modified.
+    repository custom instructions are not loaded. Inputs are copied into a
+    throwaway scratch directory and file access is whitelisted (--add-dir) to
+    that directory alone, so repo paths supplied via -ContextPath never expose
+    their parent directories. The agent can read those inputs and emit text --
+    nothing is executed and nothing is modified.
 
     The Copilot CLI rejects plain-text files as --attachment ("native
     document" only), so inputs are delivered as files the model reads with its
@@ -99,17 +100,37 @@ $contextFiles = foreach ($path in $contextPaths) {
     (Resolve-Path -LiteralPath $path).Path
 }
 
-$files = @($reviewFiles) + @($contextFiles)
+# Run from a throwaway working directory for cwd hygiene. The inputs are COPIED
+# into it and that single dir is the only --add-dir: whitelisting each input's
+# parent directory would hand this repo-blind wrapper repository directories
+# whenever -ContextPath points at repo files.
+$scratch = Join-Path ([IO.Path]::GetTempPath()) ('adv-review-' + [Guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path $scratch -Force | Out-Null
 
-# Whitelist only the directories that hold the input files.
-$dirArgs = $files |
-    ForEach-Object { Split-Path -Parent $_ } |
-    Sort-Object -Unique |
-    ForEach-Object { '--add-dir'; $_ }
+try {
+    $i = 0
+    $copiedReview = foreach ($f in $reviewFiles) {
+        $dest = Join-Path $scratch ('review-{0:D2}-{1}' -f $i, (Split-Path $f -Leaf))
+        Copy-Item -LiteralPath $f -Destination $dest -Force -ErrorAction Stop
+        $i++
+        $dest
+    }
+    $copiedContext = @()
+    if ($contextFiles) {
+        $ctxDir = Join-Path $scratch 'context'
+        New-Item -ItemType Directory -Path $ctxDir -Force | Out-Null
+        $i = 0
+        $copiedContext = foreach ($f in $contextFiles) {
+            $dest = Join-Path $ctxDir ('{0:D2}_{1}' -f $i, (Split-Path $f -Leaf))
+            Copy-Item -LiteralPath $f -Destination $dest -Force -ErrorAction Stop
+            $i++
+            $dest
+        }
+    }
 
-# The model reads the inputs itself; spell out which files and forbid wandering.
-$reviewList = ($reviewFiles | ForEach-Object { "- $_" }) -join "`n"
-$prompt = @"
+    # The model reads the inputs itself; spell out which files and forbid wandering.
+    $reviewList = ($copiedReview | ForEach-Object { "- $_" }) -join "`n"
+    $prompt = @"
 $Instruction
 
 --- FILES TO REVIEW ---
@@ -119,9 +140,9 @@ are the material under review.
 $reviewList
 "@
 
-if ($contextFiles) {
-    $contextList = ($contextFiles | ForEach-Object { "- $_" }) -join "`n"
-    $prompt += @"
+    if ($copiedContext) {
+        $contextList = ($copiedContext | ForEach-Object { "- $_" }) -join "`n"
+        $prompt += @"
 
 
 --- REPO CONTEXT (read-only background, NOT under review) ---
@@ -132,33 +153,29 @@ permit null, is the type reachable. Do NOT raise findings against these files;
 they are background, not the change under review.
 $contextList
 "@
-}
+    }
 
-# Run from a throwaway working directory for cwd hygiene.
-$scratch = Join-Path ([IO.Path]::GetTempPath()) ('adv-review-' + [Guid]::NewGuid().ToString('N'))
-New-Item -ItemType Directory -Path $scratch -Force | Out-Null
+    # -p                  headless, single-shot run (exits when done)
+    # --allow-all-tools   required by the CLI for non-interactive mode...
+    # --deny-tool         ...but shell + write are denied (deny takes precedence),
+    #                     leaving a read-only analysis call with no side effects.
+    # --disable-builtin-mcps / --no-custom-instructions  close the repo/MCP
+    #                     side-channels so the review depends only on the inputs.
+    $copilotArgs = @(
+        '-p', $prompt
+        '--model', $Model
+        '-C', $scratch
+        '--allow-all-tools'
+        '--deny-tool=shell'
+        '--deny-tool=write'
+        '--disable-builtin-mcps'
+        '--no-custom-instructions'
+        '--no-ask-user'
+        '--no-color'
+        '--silent'
+        '--add-dir', $scratch
+    )
 
-# -p                  headless, single-shot run (exits when done)
-# --allow-all-tools   required by the CLI for non-interactive mode...
-# --deny-tool         ...but shell + write are denied (deny takes precedence),
-#                     leaving a read-only analysis call with no side effects.
-# --disable-builtin-mcps / --no-custom-instructions  close the repo/MCP
-#                     side-channels so the review depends only on the inputs.
-$copilotArgs = @(
-    '-p', $prompt
-    '--model', $Model
-    '-C', $scratch
-    '--allow-all-tools'
-    '--deny-tool=shell'
-    '--deny-tool=write'
-    '--disable-builtin-mcps'
-    '--no-custom-instructions'
-    '--no-ask-user'
-    '--no-color'
-    '--silent'
-) + $dirArgs
-
-try {
     $captured = (& copilot @copilotArgs 2>&1 | Out-String)
     $exitCode = $LASTEXITCODE
 }

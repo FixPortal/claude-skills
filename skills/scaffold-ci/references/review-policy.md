@@ -41,11 +41,13 @@ has to hold on every later commit too, because one `.gitignore` line re-excludin
 `.claude/` makes the policy file vanish and silently reverts the whole repo to NORMAL —
 and the PR making that change would be the last one reviewed properly.
 
-**Copy the shipped asset; do not retype it from this page.**
+**Copy the shipped assets; do not retype them from this page.** The guard delegates its
+workflow assertions to a structural checker, and both must land in the repo:
 
 ```bash
-mkdir -p .github/workflows
+mkdir -p .github/workflows .github/scripts
 cp ~/.agents/skills/scaffold-ci/assets/review-policy-guard.yml .github/workflows/
+cp ~/.agents/skills/scaffold-ci/assets/assert_workflow_hygiene.py .github/scripts/
 ```
 
 The path is `~/.agents/skills/`, the canonical cross-CLI home — not any single runtime's
@@ -53,12 +55,16 @@ skills root, which would resolve only under that runtime.
 
 This used to be an inlined two-check snippet, and the snippet had drifted: the shipped
 asset additionally rejects an **empty** policy file, **invalid JSON**, a **missing `high`
-array**, and a policy that has dropped `.claude/review-policy.json` or `.coderabbit.yaml`
-from `high`, and it sets `permissions: contents: read`. A repo scaffolded from the prose
-therefore got a guard that passed on four of the states the asset was extended to catch.
-The asset's own comments record why: an automated rollout once emptied the policy file
-across 21 repos, and the first version of the guard — the two-check version — passed
-throughout, because an empty file is still tracked and still unignored.
+array**, and a policy that has dropped `.claude/review-policy.json`, `.coderabbit.yaml`,
+the guard workflow itself, or the hygiene checker from `high`, and it sets
+`permissions: contents: read`. A repo scaffolded from the prose therefore got a guard
+that passed on four of the states the asset was extended to catch. The guard and checker
+are tiered HIGH because the required `Review policy intact` context is produced by the
+PR's OWN copy of the workflow — a PR that replaced its assertion steps with `run: true`
+would report green while asserting nothing, and only a HIGH tier puts that diff in front
+of a reviewer. The asset's own comments record why: an automated rollout once emptied
+the policy file across 21 repos, and the first version of the guard — the two-check
+version — passed throughout, because an empty file is still tracked and still unignored.
 
 Two details worth knowing rather than rediscovering:
 
@@ -72,18 +78,20 @@ Where this workflow exists, `.gitignore` is NORMAL — do not also tier it HIGH.
 
 ### Workflow hygiene, asserted rather than reviewed
 
-The same asset carries three assertions that replaced `.github/workflows/**` in the policy's
-`high` list on 2026-08-19 (rationale under *`.claude/review-policy.json`* below):
+The guard's workflow assertions live in the checker script it invokes,
+`.github/scripts/assert_workflow_hygiene.py` — a structural YAML parse, NOT a grep. The
+line-anchored greps it replaced were bypassable by ordinary block-style YAML (a value on
+the line after its key resolves identically but matches no key-anchored pattern), so
+`permissions:` followed by an indented `write-all`, or a `uses:` split the same way,
+both passed green. These assertions are what replaced `.github/workflows/**` in the
+policy's `high` list on 2026-08-19 (rationale under *`.claude/review-policy.json`* below):
 
 - **Third-party actions must be pinned to a full 40-character commit SHA** — a hard failure.
   A tag is mutable: whoever owns the action can change what `@v4` resolves to after review.
-- **Unpinned `actions/*` is reported, not failed.** Scoping matters here, and the scope came
-  from measuring rather than taste. Across 28 estate repos there were **319 unpinned refs and
-  only one fully pinned repo**, so a gate on all owners would have reddened 27 repos on their
-  next PR — while **third-party unpinned was exactly zero**, making the narrower gate free to
-  enforce immediately. `actions/*` is GitHub's own namespace, where a mutable tag means
-  trusting GitHub, which every workflow already does by running on their runners. Flip it to
-  a failure once a pinning sweep lands.
+- **Tag-pinned `actions/*` is conformant, not a finding.** The house standard is the
+  inverse of the third-party rule: first-party actions take the major tag, and `audit-ci`
+  grades a SHA-pinned first-party action as drift. The checker counts first-party tag
+  refs for the summary line and never fails them.
 - **No `pull_request_target`, no `permissions: write-all`** — hard failures, and both were
   already at zero occurrences estate-wide when introduced.
 
@@ -142,9 +150,12 @@ unrecognised path is unknown risk, and unknown risk is not low risk.
   (`nuget.config`, `global.json`, `.npmrc`, `Directory.Build.props`): a bot does not edit
   those, and a change to one redirects where dependencies come from.
 - **The review control plane must be HIGH in every repo** — `.claude/review-policy.json`
-  itself and `.coderabbit.yaml`. Unlisted they classify as NORMAL, which means the
-  single edit capable of disabling review across the repo would itself receive the
-  lighter review.
+  itself, `.coderabbit.yaml`, `.github/workflows/review-policy-guard.yml` and
+  `.github/scripts/assert_workflow_hygiene.py`. Unlisted they classify as NORMAL, which
+  means the single edit capable of disabling review across the repo would itself receive
+  the lighter review. The guard and checker are on the list because the required
+  `Review policy intact` context is produced by the PR's own copy of the workflow, so
+  neutering its steps would otherwise pass unreviewed.
 - **`.gitignore` is deliberately NOT HIGH, and must not be re-added.** It was removed
   on 2026-08-02 and replaced by `review-policy-guard.yml` (below). Tiering it HIGH does
   work, but it bills a CodeRabbit review — metered per developer across the whole

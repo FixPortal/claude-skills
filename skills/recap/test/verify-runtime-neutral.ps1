@@ -36,7 +36,7 @@ foreach ($needle in '../close/references/topic-key.ps1',
         throw "recap missing collision-resistant topic derivation: $needle"
     }
 }
-foreach ($needle in '$recipePath = (Resolve-Path (Join-Path $PSScriptRoot ''..\close\references\topic-key.ps1'')).Path',
+foreach ($needle in '$recipePath = (Resolve-Path (Join-Path $PSScriptRoot ''..'' ''close'' ''references'' ''topic-key.ps1'')).Path',
                      '. $recipePath',
                      '$topicInfo = Get-RepositoryTopicInfo -RepositoryRoot $repoRoot',
                      '$repoDisplayName = $topicInfo.DisplayName',
@@ -85,7 +85,7 @@ if ($text -notmatch [regex]::Escape('references/recall-icm-topics.ps1')) {
     throw 'recap does not use the executable exact-topic ICM recall contract'
 }
 
-$recallScript = Join-Path (Join-Path $PSScriptRoot '..') 'references\recall-icm-topics.ps1'
+$recallScript = Join-Path (Join-Path $PSScriptRoot '..') 'references' 'recall-icm-topics.ps1'
 if (-not (Test-Path $recallScript -PathType Leaf)) {
     throw 'recap missing executable exhaustive ICM recall helper'
 }
@@ -103,7 +103,30 @@ if ($icmCalls.Count -ne 2 -or @($icmCalls | Where-Object { $_ -notcontains '--al
     throw 'recap ICM recall can fall back to a truncated result set'
 }
 
-$workingStateScript = Join-Path (Join-Path $PSScriptRoot '..') 'references\get-working-state.ps1'
+# Mixed success/failure: a failed topic must NOT terminate the loop (that would silently drop
+# the remaining topics' recall, worse than the single-topic gap). It arrives with empty Bodies
+# and Failed=$true; the surviving topic's bodies are intact; and no partial result is passed
+# off as complete. 3>$null discards the expected per-topic Write-Warning.
+$mixed = @(& $recallScript -Topics @('context-ok', 'context-broken', 'decisions-ok') -InvokeIcm {
+    param([string[]]$Arguments)
+    if ($Arguments[2] -eq 'context-broken') { throw 'simulated icm failure' }
+    [pscustomobject]@{ topic = $Arguments[2]; summary = "body-$($Arguments[2])" } | ConvertTo-Json
+} 3>$null)
+if ($mixed.Count -ne 3) { throw "recap ICM recall must continue past a failed topic, got $($mixed.Count) results for 3 topics" }
+$mixedOk = @($mixed | Where-Object { $_.Topic -eq 'context-ok' })
+$mixedBad = @($mixed | Where-Object { $_.Topic -eq 'context-broken' })
+$mixedAfter = @($mixed | Where-Object { $_.Topic -eq 'decisions-ok' })
+if ($mixedOk.Count -ne 1 -or $mixedOk[0].Failed -or $mixedOk[0].Bodies.Count -ne 1) {
+    throw 'recap ICM recall corrupted a healthy topic around a failure'
+}
+if ($mixedBad.Count -ne 1 -or -not $mixedBad[0].Failed -or $mixedBad[0].Bodies.Count -ne 0 -or -not $mixedBad[0].Error) {
+    throw 'a failed ICM topic must arrive as an explicit empty Failed result, not be dropped or faked'
+}
+if ($mixedAfter.Count -ne 1 -or $mixedAfter[0].Failed -or $mixedAfter[0].Bodies.Count -ne 1) {
+    throw 'recap ICM recall stopped the loop at the failed topic'
+}
+
+$workingStateScript = Join-Path (Join-Path $PSScriptRoot '..') 'references' 'get-working-state.ps1'
 if (-not (Test-Path $workingStateScript -PathType Leaf)) {
     throw 'recap missing executable working-state helper'
 }
@@ -155,3 +178,7 @@ try {
 }
 
 "recap runtime-neutral contract OK - $words words"
+
+# The failed-git-lookup child above is asserted, not fatal — clear its native status so a
+# caller that checks $LASTEXITCODE after a PASS does not read the child's failure.
+$global:LASTEXITCODE = 0

@@ -70,6 +70,7 @@ export default defineConfig([
       'sonarjs/no-wildcard-import': 'off',
       'sonarjs/function-name': 'off',
       'sonarjs/no-hardcoded-ip': 'off',
+      // Test code imports devDependencies (vitest, testing-library) by design.
       'sonarjs/no-implicit-dependencies': 'off',
     },
   },

@@ -43,10 +43,11 @@ V2 addresses two structural weaknesses in the v1 panel:
   mode) and X (Codex, hard read-only sandbox). Gemini and Kimi stay diff-blind,
   fed the key files via `-ContextPath`. Kimi ships blind deliberately: Kimi Code
   has no per-invocation read-only flag (global mode is `yolo`), so pointing it at
-  the repo is a trust-boundary risk the hard-sandbox reviewers don't carry — flip
-  `repoAccess:true` to enable `--add-dir` tracing, guarded only by prompt +
-  git-tree. This still fixes v1's repo-blind abstention (v1 had only Anthropic
-  repo-aware; v2 adds Codex).
+  the repo is a trust-boundary risk the hard-sandbox reviewers don't carry. The
+  invariant is non-negotiable: a wrapper with no hard per-invocation read-only
+  mode never gets repo access, in any role — do not flip `repoAccess:true` for
+  one; prompt plus git-tree is not a guard. This still fixes v1's repo-blind
+  abstention (v1 had only Anthropic repo-aware; v2 adds Codex).
 - **The wrapper explicitly pins `kimi-code/kimi-for-coding`** (K2.7 Coding,
   Standard), independent of the user's current CLI default. It previously used
   `-highspeed`, but that variant
@@ -102,6 +103,18 @@ Every wrapper declares this required minimum:
 `-UsageSidecarPath` are optional capabilities. The driver introspects them and
 passes only supported flags. Every wrapper returns review text on stdout and a
 non-zero exit on failure.
+
+Each wrapper also declares two pre-flight header tokens, enforced by the
+contract test for every wrapper an enabled reviewer can reach:
+
+- `PREFLIGHT_COMMAND: <command>` — the exact probe the host runs before
+  fan-out (typically an auth/version check against the CLI).
+- `PREFLIGHT_SUCCESS: <text>` — the output the host accepts as passing.
+
+The host executes them; `run-review.ps1` never parses the headers, so a wrapper
+without them is unverified, not passing, and results are recorded into
+`preflight.json` in the run root (see SKILL.md, Pre-flight).
+
 Read-only and hermetic: `codex exec --sandbox read-only`; Kimi (`kimi -p`, which
 cannot combine with `--plan`) is run hermetically instead — throwaway scratch cwd,
 copied context, repo not in the workspace, prompt forbids mutation;
@@ -134,17 +147,20 @@ Unchanged. All five attack the pooled, anonymised findings.
 Unchanged. Vendor-weighted consensus over four vendors. Judge reads the repo to
 settle contested mechanisms.
 
-### Phase 3.5 — judge-audit (opt-in)
+### Phase 3.5 — judge-audit (mandatory on merge-gating runs)
 A single cross-vendor pass (default a non-Anthropic vendor — Kimi or Codex)
 that audits the Opus judge's report for: findings silently dropped between the
 pooled set and the report, severity mis-rating vs the evidence, and consensus
 tags that don't match the vendor split. It does **not** re-review the code; it
 checks the adjudication against its own inputs. Output: a short list of
-`{findingId, issue, suggested correction}` the host folds back before Phase 4.
-Off by default — the host runs it when the user asks, and should recommend it for
-any run whose findings will gate a merge. There is no driver flag: `run-review.ps1`
-stops at the judgment boundary, so Phases 3 onward belong to the host and a flag
-on the driver could never reach this phase.
+`{findingId, issue, suggested correction}` the host folds back before Phase 4 —
+DROPPED corrections carry a complete house-style finding block and fold
+unconditionally; demotions route back to the judge. Mandatory (not merely
+recommended) whenever the review gates a merge or the target is HIGH-tier under
+the repo's review policy — the same tier signal the review-policy gate uses.
+Otherwise the host runs it when the user asks. There is no driver flag:
+`run-review.ps1` stops at the judgment boundary, so Phases 3 onward belong to
+the host and a flag on the driver could never reach this phase.
 
 The panel's multi-vendor inputs do not make it redundant. Those cover Phases 1-2;
 Phase 3 is a single judge, and the one stage that can lose a finding outright.
@@ -153,8 +169,8 @@ report, verifies only Criticals/Highs/contested, and never inspects consensus
 tags, so dropped, demoted and mislabelled findings all pass it untouched.
 
 ### Phase 4 — verify (NOW cross-vendor pool)
-Every Critical/High and every `[contested]` finding is verified by a fresh agent
-that took no part in the report. v2 draws verifiers from a **cross-vendor pool**
+Every Critical, every High and every contested finding is verified by a fresh
+agent that took no part in the report. v2 draws verifiers from a **cross-vendor pool**
 — Sonnet, Kimi, Codex — assigned round-robin by vendor, so no single vendor
 owns verification. For a finding with more than one failure mode, assign
 **diverse lenses** across vendors (correctness / security / does-it-reproduce).

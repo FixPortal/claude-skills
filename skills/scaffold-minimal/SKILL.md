@@ -18,7 +18,7 @@ Before converting any controller, read [the complete conversion contract](refere
 3. Derive effective routes exactly: combine controller/action templates, preserve absolute templates and multiple providers, expand tokens, and retain constraints, defaults, optionality, names, order, and HTTP methods. Conventional/custom routing requires inspecting runtime endpoints.
 4. Map handlers and metadata. Use a route group only when factoring a literal common prefix preserves every final route and metadata set.
 5. Compare before/after `EndpointDataSource` route tables as exact multisets. Exercise authorization, validation failures, binding sources, filters, content types, headers, and status codes.
-6. Remove a controller or MVC registration only after all dependent behavior is mapped and verified. Add OpenAPI/Scalar only in the development environment.
+6. Remove a controller or MVC registration only after all dependent behavior is mapped and verified. Add OpenAPI/Scalar only in the development environment — and when the app already exposes them, preserve its existing gating rather than re-wrapping it.
 
 ## Load-bearing rules
 
@@ -36,6 +36,6 @@ Before converting any controller, read [the complete conversion contract](refere
 - [ ] Unsupported behavior retained and reported.
 - [ ] Effective route/metadata multisets match.
 - [ ] Authorization, binding, validation, and response parity tested.
-- [ ] OpenAPI and Scalar are development-only.
+- [ ] Newly introduced OpenAPI and Scalar are development-only; existing surfaces keep their gating.
 - [ ] Required endpoint classes are registered.
 - [ ] Build and parity tests pass.

@@ -25,10 +25,18 @@ max_line_length = 80
 
 [**/*.cs]
 max_line_length = 100
+
+[*.csx]
+max_line_length = 60
+
+[*.csproj]
+max_line_length = 40
 '@ | Set-Content -LiteralPath $editorConfig
 
-    $assignments = @(& $reader -Path $editorConfig -Key max_line_length -SectionPattern '\*\.cs')
-    Assert-Equal $assignments.Count 1 'Commented and unrelated assignments must not count.'
+    # The pattern is anchored to the whole section glob: '\*\.cs' alone would once have
+    # matched [*.csx] and [*.csproj] too, lifting a value from an unrelated section.
+    $assignments = @(& $reader -Path $editorConfig -Key max_line_length -SectionPattern '(?:\*\*/)?\*\.cs')
+    Assert-Equal $assignments.Count 1 'Commented, [*.csx], [*.csproj] and unrelated-glob assignments must not count.'
     Assert-Equal $assignments[0].Value '100' 'The active C# assignment must be returned.'
 
     $skill = Get-Content -LiteralPath (Join-Path $skillRoot 'SKILL.md') -Raw

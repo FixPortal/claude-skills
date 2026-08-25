@@ -29,7 +29,8 @@ templates are the source of truth; the version table below pins the floor.
 ## Stack and versions
 
 Before selecting or changing dependencies, read
-`~/.agents/notes/npm-publishing-traps.md`. Pin a mutually compatible set from
+`~/.agents/notes/npm-publishing-traps.md` (if that note is not present, proceed
+and record the assumption). Pin a mutually compatible set from
 the lockfile evidence; do not equate each package's independent latest version
 with a resolvable stack.
 
@@ -107,7 +108,8 @@ the layout that actually exists. Treat a feature-first migration as its own task
 ## Config (copy from `templates/`)
 
 Before changing Vite configuration or plugins, read
-`~/.agents/notes/web-ui-traps.md`.
+`~/.agents/notes/web-ui-traps.md` (if that note is not present, proceed and
+record the assumption).
 
 - `templates/package.json` — minimum dependency and script contract, including
   `test: vitest run` and coverage. Adapt only the package name and app/library
@@ -125,8 +127,10 @@ Before changing Vite configuration or plugins, read
   `--coverage` run over all of src, not the smaller test-touched-only figure.
   `globals: true` is deliberately omitted (tests import from `vitest`; this also
   keeps ArchUnitTS's root import from throwing).
-- `templates/tsconfig.json` + `tsconfig.app.json` + `tsconfig.node.json` —
-  bundler mode, strict, `target`/`lib` es2023.
+- `templates/tsconfig.json` + `tsconfig.app.json` + `tsconfig.node.json` +
+  `tsconfig.test.json` — bundler mode, strict, `target`/`lib` es2023. The test
+  project owns `*.test.*`/`*.spec.*`/`*.archunit.*` and `src/test/**`, so test
+  sources are type-checked by `tsc -b` instead of belonging to no project.
 - `templates/src/test/setup.ts` — jest-dom matchers + explicit RTL cleanup
   (needed because globals are off). Add project-specific shims below the core.
 
@@ -135,7 +139,7 @@ Before changing Vite configuration or plugins, read
 Enable the **full recommended set**, downgrade every Sonar rule to `warn`
 (advisory, **non-blocking** — `eslint .` must still exit 0), and switch off the
 rules that are stylistic policy or false-positive noise. Cognitive complexity is
-the complexity gate; do **not** also enable cyclomatic-complexity (it over-counts
+the advisory complexity signal; do **not** also enable cyclomatic-complexity (it over-counts
 flat switch/ternary dispatch). The wiring — the spread-then-downgrade pattern and
 the off-list (`file-header`, `arrow-function-convention`,
 `declarations-in-global-scope`, `cyclomatic-complexity`, `no-reference-error`) —
@@ -147,7 +151,8 @@ WHY comment), never by removing the plugin.
 ## Architecture tests (ArchUnitTS)
 
 Before changing ArchUnitTS configuration, read
-`~/.agents/notes/archunitts-traps.md`.
+`~/.agents/notes/archunitts-traps.md` (if that note is not present, proceed and
+record the assumption).
 
 `archunit` enforces file/folder-level architecture: directional
 layering and import-cycle freedom — the things review and ESLint don't catch. Two
@@ -206,7 +211,7 @@ When scaffolding or normalizing a frontend, verify:
 - [ ] ESLint flat config with `typescript-eslint`, react-hooks, react-refresh
 - [ ] `eslint-plugin-sonarjs` full recommended at `warn`; noise rules off;
       `eslint .` exits 0
-- [ ] cognitive-complexity gate on, cyclomatic-complexity off
+- [ ] cognitive-complexity advisory on, cyclomatic-complexity off
 - [ ] Vitest + Testing Library + jsdom wired with `src/test/setup.ts`;
       `@vitest/coverage-v8` added with coverage thresholds in `vitest.config.ts`
 - [ ] ArchUnitTS wired: `archunit` pinned exactly, `architecture.archunit.ts`

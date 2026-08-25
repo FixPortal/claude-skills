@@ -148,3 +148,7 @@ finally {
         Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
+
+# The exit-1 assurance children above are asserted, not fatal — clear the native status
+# so a caller that checks $LASTEXITCODE after a PASS does not read a child's failure.
+$global:LASTEXITCODE = 0

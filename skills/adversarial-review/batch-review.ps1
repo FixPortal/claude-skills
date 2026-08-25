@@ -53,6 +53,15 @@
 .PARAMETER BatchSize
     Chunks run concurrently (default 3).
 
+.PARAMETER ChunkTimeoutSeconds
+    Wall-clock ceiling per chunk (default 6000). The spine bounds each ROUND with
+    -RoundTimeoutSeconds (default 2700, two rounds), but a hang OUTSIDE the bounded
+    rounds — e.g. an unbounded `gh pr diff` while resolving a PR target — would
+    otherwise stall the whole batch forever. Sized above 2 x the round default so a
+    slow-but-legitimate chunk is not cut off mid-Phase-2. A timed-out chunk is
+    recorded distinctly (timedOut: true in batch-summary.json), not as a non-zero
+    exit.
+
 .OUTPUTS
     Writes <RunRoot>/<chunkId>/* per chunk (including metrics.json), a
     <RunRoot>/batch-summary.json roll-up, and prints the RunRoot + next steps.
@@ -71,7 +80,12 @@ param(
     [string] $PreamblePath,
 
     [ValidateRange(1, [int]::MaxValue)]
-    [int] $BatchSize = 3
+    [int] $BatchSize = 3,
+
+    # Above 2 x the spine's RoundTimeoutSeconds default (2700) so a chunk is only
+    # cut off when something OUTSIDE the bounded rounds has wedged.
+    [ValidateRange(60, 86400)]
+    [int] $ChunkTimeoutSeconds = 6000
 )
 
 $ErrorActionPreference = 'Stop'
@@ -172,7 +186,18 @@ try {
     throw $cleanupError
 }
 
-$results = $chunks | ForEach-Object -ThrottleLimit $BatchSize -Parallel {
+# -TimeoutSeconds bounds each chunk: the spine bounds its own rounds, but a hang
+# outside them (an unbounded `gh pr diff` during target resolution is the observed
+# shape) would stall the batch forever. -ErrorAction is NOT accepted in the Parallel
+# parameter set, so the script-level 'Stop' is relaxed around the call — the timeout
+# raises a non-terminating error that would otherwise abort the whole batch. Chunks
+# that never report get a synthesised timed-out row below, distinct from a non-zero
+# exit: a stall is a different diagnosis from a failed spine.
+$chunkTimeoutErrors = @()
+$previousErrorAction = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
+try {
+    $results = $chunks | ForEach-Object -ThrottleLimit $BatchSize -TimeoutSeconds $ChunkTimeoutSeconds -ErrorVariable +chunkTimeoutErrors -Parallel {
     $c = $_
     $spine      = $using:spine
     $RunRoot    = $using:RunRoot
@@ -198,11 +223,45 @@ $results = $chunks | ForEach-Object -ThrottleLimit $BatchSize -Parallel {
     $exit = $LASTEXITCODE
     Set-Content -LiteralPath (Join-Path $chunkDir 'run-output.txt') -Value $out -Encoding utf8
 
+    # A clean chunk (panel convened, zero findings) exits 0 exactly like a chunk with
+    # findings — read pooledCount out of the chunk's status.json so the summary can
+    # tell "clean" apart from both "found issues" and "failed".
+    $pooledCount = $null
+    if ($exit -eq 0) {
+        $chunkStatus = Join-Path $chunkDir 'status.json'
+        if (Test-Path -LiteralPath $chunkStatus) {
+            try { $pooledCount = [int]((Get-Content -LiteralPath $chunkStatus -Raw | ConvertFrom-Json).pooledCount) }
+            catch { $pooledCount = $null }
+        }
+    }
+
     [pscustomobject]@{
-        chunkId = $c.id; label = $c.label; exitCode = $exit
+        chunkId = $c.id; label = $c.label; exitCode = $exit; timedOut = $false
+        pooledCount = $pooledCount
         elapsedSec = [int]($sw.Elapsed.TotalSeconds); workDir = $chunkDir
         hasMetrics = (Test-Path -LiteralPath (Join-Path $chunkDir 'metrics.json'))
     }
+    }
+}
+finally {
+    $ErrorActionPreference = $previousErrorAction
+}
+
+$results = @($results)
+if ($chunkTimeoutErrors.Count -gt 0) {
+    $reportedChunks = @($results | ForEach-Object { $_.chunkId })
+    $wedged = @($chunks | Where-Object { $_.id -notin $reportedChunks })
+    foreach ($m in $wedged) {
+        $results += [pscustomobject]@{
+            chunkId = $m.id; label = $m.label; exitCode = $null; timedOut = $true
+            pooledCount = $null
+            elapsedSec = $ChunkTimeoutSeconds; workDir = (Join-Path $RunRoot $m.id)
+            hasMetrics = $false
+        }
+    }
+    Write-Warning ("$($wedged.Count) chunk(s) hit the ${ChunkTimeoutSeconds}s chunk timeout and were stopped: " +
+        "$(@($wedged | ForEach-Object { $_.id }) -join ', '). A chunk stall is outside the spine's bounded rounds " +
+        '(check target resolution, e.g. gh pr diff). They contribute no metrics.')
 }
 
 $results = @($results) | Sort-Object chunkId
@@ -273,15 +332,21 @@ try {
     throw
 }
 
-$failed  = @($results | Where-Object { $_.exitCode -ne 0 })
+$timedOutChunks = @($results | Where-Object { $_.timedOut })
+$failed  = @($results | Where-Object { -not $_.timedOut -and $_.exitCode -ne 0 })
 $noMetrics = @($results | Where-Object { $_.exitCode -eq 0 -and -not $_.hasMetrics })
+# A chunk whose panel convened and found nothing is a CLEAN result — not a failure
+# and not a chunk with findings. Surface it by name so "exit 0, no findings" is a
+# deliberate, visible outcome rather than silently reading as either of the others.
+$clean = @($results | Where-Object { $_.exitCode -eq 0 -and $null -ne $_.pooledCount -and $_.pooledCount -eq 0 })
 
 Write-Host ""
 Write-Host "==== batch complete: $RunId ===="
-$results | Format-Table chunkId, label, exitCode, elapsedSec, hasMetrics -AutoSize | Out-String | Write-Host
+$results | Format-Table chunkId, label, exitCode, timedOut, pooledCount, elapsedSec, hasMetrics -AutoSize | Out-String | Write-Host
 if ($carried) {
     Write-Host "Kept $($carried.Count) chunk(s) already in this RunRoot ($($carried -join ', ')) — the run now has $($summaryRows.Count) chunk(s) in total."
 }
+if ($clean)    { Write-Host "$($clean.Count) chunk(s) CLEAN (panel convened, zero findings): $($clean.chunkId -join ', ')." }
 if ($failed)    { Write-Warning "$($failed.Count) chunk(s) failed: $($failed.chunkId -join ', ') — they contribute no metrics." }
 if ($noMetrics) { Write-Warning "$($noMetrics.Count) chunk(s) left no metrics.json: $($noMetrics.chunkId -join ', ')." }
 Write-Host ""
@@ -292,4 +357,4 @@ Write-Host "     (accepted per reviewer + judge participant)."
 Write-Host "  3. pwsh -NoProfile -File `"$scriptDir\aggregate-and-emit.ps1`" -RunRoot `"$RunRoot`" -Repo <repo> [-Summary <name>]"
 # `chunks` is what THIS invocation ran; `runChunks` is what the RunRoot now holds
 # in total, which is the number aggregate-and-emit.ps1 will emit as ChunkCount.
-[pscustomobject]@{ runRoot = $RunRoot; runId = $RunId; chunks = $results.Count; runChunks = $summaryRows.Count; failed = $failed.Count } | ConvertTo-Json -Compress
+[pscustomobject]@{ runRoot = $RunRoot; runId = $RunId; chunks = $results.Count; runChunks = $summaryRows.Count; failed = $failed.Count; timedOut = $timedOutChunks.Count; clean = $clean.Count } | ConvertTo-Json -Compress

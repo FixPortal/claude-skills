@@ -4,7 +4,7 @@
     "target": "es2023",
     "lib": ["ES2023", "DOM", "DOM.Iterable"],
     "module": "esnext",
-    "types": ["vite/client", "@testing-library/jest-dom"],
+    "types": ["vite/client"],
     "skipLibCheck": true,
     "strict": true,
 
@@ -26,6 +26,6 @@
   // Keep test-only files out of the APP compile boundary. architecture.spec.ts +
   // its architecture.archunit wrapper deep-import `archunit/dist` (a devDependency);
   // noEmit + skipLibCheck mask the bleed today but it bites any consumer who removes
-  // noEmit or points a bundler here. Tests compile under vitest, not this project.
-  "exclude": ["src/**/*.spec.*", "src/**/*.archunit.*", "src/**/*.test.*"]
+  // noEmit or points a bundler here. Tests compile under tsconfig.test.json, not here.
+  "exclude": ["src/**/*.spec.*", "src/**/*.archunit.*", "src/**/*.test.*", "src/test/**"]
 }

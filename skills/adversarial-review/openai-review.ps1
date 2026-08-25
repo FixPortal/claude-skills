@@ -20,6 +20,10 @@
 
     Requires:
       $env:OPENAI_API_KEY  -- an OpenAI API key with Chat Completions access.
+    Optional:
+      $env:OPENAI_BASE_URL -- override the API base URL (default
+                              https://api.openai.com/v1), e.g. for an
+                              API-compatible gateway or proxy.
 
 .PARAMETER Instruction
     The review or cross-examination instruction (the brief). Typically supplied
@@ -122,8 +126,12 @@ if ([string]::IsNullOrWhiteSpace($Instruction)) {
 $sb = [System.Text.StringBuilder]::new()
 [void]$sb.AppendLine($Instruction)
 [void]$sb.AppendLine()
-[void]$sb.AppendLine('STYLE REQUIREMENT: Terse output only. No preamble, no summary, no closing remarks. Per finding: severity + location + one-sentence description + one-sentence fix. Skip any finding you cannot substantiate from the diff.')
-[void]$sb.AppendLine()
+if (-not $FindingsPath) {
+    # Phase-1 style directive only: in Phase 2 (-FindingsPath) the brief owns the
+    # verdict format, and an appended per-finding directive AFTER it conflicts.
+    [void]$sb.AppendLine('STYLE REQUIREMENT: Terse output only. No preamble, no summary, no closing remarks. Per finding: severity + location + one-sentence description + one-sentence fix. Skip any finding you cannot substantiate from the diff.')
+    [void]$sb.AppendLine()
+}
 [void]$sb.AppendLine('--- DIFF UNDER REVIEW ---')
 [void]$sb.AppendLine((Read-InputFile $DiffPath 'Diff file'))
 
@@ -174,10 +182,14 @@ $retryableStatus = @(401, 408, 429, 500, 502, 503, 504)
 $maxAttempts = 4
 $response = $null
 
+# Endpoint override for API-compatible gateways/proxies; defaults to the public
+# OpenAI Chat Completions endpoint (a public vendor URL, not a secret).
+$openAiBaseUrl = [string]::IsNullOrWhiteSpace($env:OPENAI_BASE_URL) ? 'https://api.openai.com/v1' : $env:OPENAI_BASE_URL.TrimEnd('/')
+
 for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
     try {
         $response = Invoke-RestMethod `
-            -Uri 'https://api.openai.com/v1/chat/completions' `
+            -Uri "$openAiBaseUrl/chat/completions" `
             -Method Post `
             -ContentType 'application/json; charset=utf-8' `
             -Headers @{ 'Authorization' = "Bearer $env:OPENAI_API_KEY" } `

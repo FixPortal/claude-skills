@@ -81,6 +81,9 @@ who asked only for parity. The skill's frontmatter separates the two triggers de
 
 When they ARE wanted:
 
+- If the app **already exposes** OpenAPI/Scalar, preserve its existing environment
+  gating exactly — converting controllers must not change when those surfaces are
+  served. The development-only wrapper below is for **newly introduced** endpoints.
 - Add `builder.Services.AddOpenApi()` in the services section
 - Add a development-only block for OpenAPI and Scalar:
   ```csharp
@@ -135,13 +138,23 @@ public static class GreetingEndpoints
 ```
 
 **Why `Results.Text` and not `TypedResults.Ok` here.** `ActionResult<string>` returning a
-bare string goes through MVC's `StringOutputFormatter`: the body is `Hello, Ada` with
-content type `text/plain`. `TypedResults.Ok("Hello, Ada")` JSON-serialises instead — the
+bare string goes through MVC's `StringOutputFormatter` for a default `Accept: */*`
+request: the body is `Hello, Ada` with content type `text/plain`. `TypedResults.Ok("Hello, Ada")` JSON-serialises instead — the
 body becomes `"Hello, Ada"`, quotes included, as `application/json`. Both the payload and
 the content type change, which is exactly the observable contract this skill promises not
 to touch, and `.Produces<string>()` only sets metadata so it hides the difference rather
 than fixing it. A `string`-returning action is the one case where the minimal-API default
 is not the faithful conversion. Where the action returns a DTO, `TypedResults.Ok` is
 correct — both sides JSON-serialise identically.
+
+One caveat on the default above: `text/plain` is what MVC serves for the default
+`Accept: */*` case. A request with a concrete `Accept: application/json` negotiates
+past `StringOutputFormatter` and gets a JSON-serialised, quoted body
+(`"Hello, Ada"` as `application/json`) — verified against a `net10.0` project. An
+unconditional `Results.Text(..., "text/plain")` answers `text/plain` to that client
+too. If the inventory shows callers that send a concrete JSON `Accept` header, record
+the difference and reproduce it deliberately (for example `Results.Json` when JSON is
+requested), or keep the controller; do not let the example's default case read as the
+whole contract.
 
 Verify the route table and response contract before deleting the controller.

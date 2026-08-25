@@ -40,7 +40,7 @@ if (-not $repos) { Write-Error "No git repos under $Path"; exit 3 }
 
 function Get-VaultData {
   param([string]$RepoName, [string]$VaultRoot)
-  $empty = [pscustomobject]@{ exists = $false; indexPath = $null; reviewers = @(); judge = $null; date = $null; reviewType = $null; tally = $null; reportFiles = @(); reviewTarget = $null; reviewScope = $null; isDocumentReview = $false; subsystemPath = $null }
+  $empty = [pscustomobject]@{ exists = $false; indexPath = $null; runName = $null; reviewers = @(); judge = $null; date = $null; reviewType = $null; tally = $null; reportFiles = @(); reviewTarget = $null; reviewScope = $null; isDocumentReview = $false; subsystemPath = $null }
   $repoDir = Join-Path $VaultRoot $RepoName
   if (-not (Test-Path $repoDir)) { return $empty }
   # Each run is a timestamped subfolder holding _index.md. Pick the run with the newest frontmatter date (fallback: folder mtime).
@@ -52,7 +52,9 @@ function Get-VaultData {
     [datetime]$fmDate = [datetime]::MinValue
     $head = Get-Content $idx -TotalCount 12
     $dm = ($head | Select-String -Pattern '^date:\s*(\d{4}-\d{2}-\d{2})').Matches
-    if ($dm.Count) { [datetime]::TryParse($dm[0].Groups[1].Value, [ref]$fmDate) | Out-Null }
+    # ISO day from frontmatter: parse exactly, culture-invariantly. A bare TryParse is
+    # culture-dependent and a non-Gregorian or day-first culture can refuse or misread it.
+    if ($dm.Count) { [datetime]::TryParseExact($dm[0].Groups[1].Value, 'yyyy-MM-dd', [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::None, [ref]$fmDate) | Out-Null }
     $effective = if ($fmDate -gt [datetime]::MinValue) { $fmDate } else { $run.LastWriteTime }
     # Frontmatter dates are day-granular, so two same-day runs of one repo tie. Break the tie
     # toward the later run FOLDER NAME (a sortable UTC timestamp, 20260528T221207Z) so the newest
@@ -88,7 +90,10 @@ function Get-VaultData {
   $sev = @{}
   foreach ($label in 'Critical','High','Medium','Low') {
     $sm = [regex]::Match($tallyScope, "(?im)^\s*\|\s*$label\s*\|\s*(\d+)\s*\|")   # table row
-    if (-not $sm.Success) { $sm = [regex]::Match($tallyScope, "(?im)$label\s*:\s*(\d+)") }  # inline
+    # Inline: the (?<![\w-]) lookbehind blocks substring hits inside longer words —
+    # with no ## Tally section the scope is the whole document, and a bare
+    # case-insensitive match read "Workflow: 5" as Low and "Non-critical: 4" as Critical.
+    if (-not $sm.Success) { $sm = [regex]::Match($tallyScope, "(?im)(?<![\w-])$label\s*:\s*(\d+)") }  # inline
     if ($sm.Success) { $sev[$label] = [int]$sm.Groups[1].Value }
   }
   if ($sev.Count) { $tally = [pscustomobject]$sev }
@@ -106,7 +111,7 @@ function Get-VaultData {
     $subsystemPath = $Matches[1].Trim().Trim('"', "'", '`')
   }
   $reports = @(Get-ChildItem $best.FullName -Filter 'report*.md' | Select-Object -ExpandProperty Name)
-  [pscustomobject]@{ exists = $true; indexPath = $idx; reviewers = $reviewers; judge = $judge; date = $date; reviewType = $reviewType; tally = $tally; reportFiles = $reports; reviewTarget = $reviewTarget; reviewScope = $reviewScope; isDocumentReview = $isDocumentReview; subsystemPath = $subsystemPath }
+  [pscustomobject]@{ exists = $true; indexPath = $idx; runName = $best.Name; reviewers = $reviewers; judge = $judge; date = $date; reviewType = $reviewType; tally = $tally; reportFiles = $reports; reviewTarget = $reviewTarget; reviewScope = $reviewScope; isDocumentReview = $isDocumentReview; subsystemPath = $subsystemPath }
 }
 
 # Resolve a vault folder to the code it actually reviewed, via the file:/// links its
@@ -163,22 +168,36 @@ function Resolve-VaultTarget {
   # -> personal-budget-tracker) that both the file:/// walk-up and the name search miss: the sha
   # does not care what the folder or the repo is called. The all-zero empty-tree sha of a
   # first-commit `0000000..x` diff is ignored — it resolves in every repo and proves nothing.
+  # Seed each candidate root ITSELF when it holds a .git: in single-repo mode $ScanPath is the
+  # repository, and enumerating only its children leaves a vault folder with no sha/name target.
   $candidates = @(
     foreach ($root in @(@($ScanPath) + @($RepoRoots) | Where-Object { $_ -and (Test-Path $_) })) {
+      if (Test-Path (Join-Path $root '.git')) { Get-Item -LiteralPath $root }
       Get-ChildItem $root -Directory -ErrorAction SilentlyContinue | Where-Object { Test-Path (Join-Path $_.FullName '.git') }
     }
   )
   $scopeSha = $null
   foreach ($tx in $texts) {
-    $sm = [regex]::Match($tx, '(?im)scope:\**\s*`?([0-9a-f]{7,40})\.\.')
+    # Tolerate a surrounding quote as well as a backtick: `scope: "<sha>..HEAD"` is valid YAML,
+    # and Get-VaultData strips it — an intolerant re-parse here fails stage 2 silently and
+    # degrades to the stage-3 name guess.
+    $sm = [regex]::Match($tx, '(?im)scope:\**\s*[''"`]?([0-9a-f]{7,40})\.\.')
     if ($sm.Success -and ($sm.Groups[1].Value -notmatch '^0+$')) { $scopeSha = $sm.Groups[1].Value; break }
   }
   if ($scopeSha) {
-    foreach ($c in $candidates) {
-      & git -C $c.FullName cat-file -e "$scopeSha^{commit}" 2>$null
-      if ($LASTEXITCODE -eq 0) {
-        return [pscustomobject]@{ resolved = $true; repoPath = $c.FullName; repoName = $c.Name; subsystemPath = $null }
-      }
+    # Collect ALL matches, not the first: a fork, mirror or worktree also contains the sha, and
+    # taking the first enumeration would silently credit the review to whichever sorted earliest.
+    $shaMatches = @($candidates | Where-Object {
+      & git -C $_.FullName cat-file -e "$scopeSha^{commit}" 2>$null
+      $LASTEXITCODE -eq 0
+    })
+    if ($shaMatches.Count -eq 1) {
+      return [pscustomobject]@{ resolved = $true; repoPath = $shaMatches[0].FullName; repoName = $shaMatches[0].Name; subsystemPath = $null }
+    }
+    if ($shaMatches.Count -gt 1) {
+      Write-Warning ("${FolderName}: scope sha $scopeSha resolves in $($shaMatches.Count) repos (" +
+        (($shaMatches | ForEach-Object { $_.Name }) -join ', ') + ") — ambiguous, leaving unresolved.")
+      return $miss
     }
   }
 
@@ -189,16 +208,24 @@ function Resolve-VaultTarget {
   $want = ($FolderName -replace '[^a-z0-9]', '').ToLowerInvariant()
   if ($want.Length -ge 4) {
     foreach ($mode in 'eq', 'suffix', 'contains') {
-      $byName = $candidates | Where-Object {
+      # As with the sha stage above: collect every match and resolve only on a UNIQUE candidate.
+      # 'fix-portal' vs 'FixPortal' differ only by enumeration order, and silently taking the
+      # first is how a review gets credited to the wrong repo.
+      $byName = @($candidates | Where-Object {
         $n = ($_.Name -replace '[^a-zA-Z0-9]', '').ToLowerInvariant()
         switch ($mode) {
           'eq'       { $n -eq $want }
           'suffix'   { $want.Length -ge 5 -and $n.EndsWith($want) }
           'contains' { $want.Length -ge 5 -and $n.Contains($want) }
         }
-      } | Select-Object -First 1
-      if ($byName) {
-        return [pscustomobject]@{ resolved = $true; repoPath = $byName.FullName; repoName = $byName.Name; subsystemPath = $null }
+      })
+      if ($byName.Count -eq 1) {
+        return [pscustomobject]@{ resolved = $true; repoPath = $byName[0].FullName; repoName = $byName[0].Name; subsystemPath = $null }
+      }
+      if ($byName.Count -gt 1) {
+        Write-Warning ("${FolderName}: name search ($mode) matched $($byName.Count) repos (" +
+          (($byName | ForEach-Object { $_.Name }) -join ', ') + ") — ambiguous, leaving unresolved.")
+        return $miss
       }
     }
   }
@@ -235,14 +262,18 @@ function Get-SubsystemTarget {
       if (@($segs | Where-Object { $_[$i] -ne $seg }).Count) { break }
       $common += $seg
     }
-    # Drop a trailing file name (a leaf with an extension is not a directory). The Count -gt 1
+    # Drop a trailing file name (a leaf with an extension is not a directory). The leaf must
+    # not START with a dot: an unanchored '\.\w+$' also matches a dot-initial DIRECTORY segment
+    # ('.github'), and when that is the sole common segment the drop nulls subsystemPath and
+    # silently turns a subsystem review into a repo-wide one (links diverging directly beneath
+    # '.github/' reach this shape). The Count -gt 1
     # guard is load-bearing: for a single segment, $common[0..($common.Count - 2)] is
     # $common[0..-1], and PowerShell expands 0..-1 to the range 0,-1 — indexing element 0 AND
     # the last element, which DUPLICATES the sole segment instead of dropping it. That yielded
     # subsystemPath='Program.cs\Program.cs' and isSubsystem=$true — a false subsystem, the exact
     # misclassification this function exists to prevent. Reachable whenever a report's only
     # file:/// links point at a repo-root file.
-    if ($common.Count -and $common[-1] -match '\.\w+$') {
+    if ($common.Count -and $common[-1] -notmatch '^\.' -and $common[-1] -match '\.\w+$') {
       $common = if ($common.Count -gt 1) { $common[0..($common.Count - 2)] } else { @() }
     }
     if ($common.Count) { $sub = ($common -join [IO.Path]::DirectorySeparatorChar) }
@@ -293,7 +324,7 @@ function Get-GitSide {
     $hasReviewTrailer = $body -match "(?im)$strictReviewTrailerRegex"
     if ($subject -notmatch $MarkerRegex -and -not $hasReviewTrailer) { continue }
     $fixer = ''
-    $m = [regex]::Match("$body", '(?im)^Co-Authored-By:\s*(Claude [^<]+?)\s*<')
+    $m = [regex]::Match("$body", '(?im)^Co-Authored-By:\s*([^<]+?)\s*<')
     if ($m.Success) { $fixer = $m.Groups[1].Value.Trim() }
     $dateShort = if ($date.Length -ge 10) { $date.Substring(0,10) } else { $date }
     [pscustomobject]@{ sha = $sha; date = $dateShort; subject = $subject; body = $body.Trim(); fixerModel = $fixer }
@@ -320,8 +351,16 @@ function Get-GitSide {
     if ($exactTip) {
       $boundarySha = $exactTip; $lastReviewDate = $Vault.date; $boundarySource = 'vault-target'
     } elseif ($Vault.date) {
-      # Tree the panel reviewed = last commit on/before the vault review date.
-      $bs = & git -C $RepoPath log --until="$($Vault.date) 23:59:59" -1 --format='%H' @pathspec 2>$null
+      # Tree the panel reviewed = last commit at/before the review's RUN time, not its day.
+      # A day-granular `--until "<date> 23:59:59"` sweeps in commits that landed AFTER the
+      # review on the same day and reports unreviewed work as reviewed. The run-folder name
+      # is a sortable UTC timestamp (20260528T221207Z); when it does not parse, anchor at the
+      # last commit BEFORE the reported day — conservative in the unreviewed-work direction.
+      $until = "$($Vault.date) 00:00:00"
+      if ($Vault.runName -match '^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z$') {
+        $until = "$($Matches[1])-$($Matches[2])-$($Matches[3]) $($Matches[4]):$($Matches[5]):$($Matches[6]) +0000"
+      }
+      $bs = & git -C $RepoPath log --until="$until" -1 --format='%H' @pathspec 2>$null
       $bsExit = $LASTEXITCODE
       if ($bsExit -eq 0 -and $bs -and "$bs".Trim()) {
         $boundarySha = "$bs".Trim(); $lastReviewDate = $Vault.date; $boundarySource = 'vault-date'
@@ -335,8 +374,11 @@ function Get-GitSide {
         $lastReviewDate = $Vault.date
       } else {
       # Vault review predates the repo's earliest commit (e.g. an OSS re-init history squash):
-      # the whole current tree is adversarially unreviewed. Anchor at the root commit.
-      # Repo-wide only - see the scoped branch above.
+      # the whole current tree is adversarially unreviewed. The root commit only MARKS that —
+      # the disjunction below classes vault-predates-history as effectively never reviewed and
+      # clears the boundary, so the scope is full history. Anchoring the boundary at the root
+      # commit instead would omit everything the squash introduced (rootSha..HEAD excludes the
+      # root) while reporting neverReviewed=false. Repo-wide only - see the scoped branch above.
         $rootSha = & git -C $RepoPath rev-list --max-parents=0 HEAD 2>$null | Select-Object -First 1
         if ($rootSha) { $boundarySha = "$rootSha".Trim() }
         $lastReviewDate = $Vault.date; $boundarySource = 'vault-predates-history'; $vaultPredatesHistory = $true
@@ -350,8 +392,12 @@ function Get-GitSide {
     if ($lastReviewCommit) { $boundarySha = $lastReviewCommit.sha; $lastReviewDate = $lastReviewCommit.date; $boundarySource = 'git-marker' }
   }
   $neverReviewed = [bool](-not $boundarySha)
-  $effectiveNeverReviewed = [bool]($neverReviewed -or ($boundarySource -eq 'git-marker' -and -not $batchMarkers.Count))
-  if ($effectiveNeverReviewed -and $boundarySource -eq 'git-marker') { $boundarySha = $null; $neverReviewed = $true }
+  # Effectively-never-reviewed has three roads in: no boundary at all; a vault report older than
+  # the repo's own history (the squash above — nothing the panel saw survives in this tree); and
+  # a git marker with no strict numbered batch/run evidence. All three mean the honest scope is
+  # the full history, so the false boundary is cleared and neverReviewed set.
+  $effectiveNeverReviewed = [bool]($neverReviewed -or $vaultPredatesHistory -or ($boundarySource -eq 'git-marker' -and -not $batchMarkers.Count))
+  if ($effectiveNeverReviewed -and ($boundarySource -eq 'git-marker' -or $boundarySource -eq 'vault-predates-history')) { $boundarySha = $null; $neverReviewed = $true }
 
   # Forward-looking scope: commits since the last review (the next review's candidate scope).
   $sinceReview = @(); $sinceFiles = 0; $sinceIns = 0; $sinceDel = 0; $sinceCount = 0
@@ -391,11 +437,14 @@ function Get-GitSide {
     elseif ($LASTEXITCODE -ne 0) { $sinceCount = $null }
   }
 
-  # Staleness in whole days (script clock; report is day-granular).
+  # Staleness in whole days (script clock; report is day-granular). SKILL.md contracts this as
+  # null when never reviewed — a lastReviewDate can survive on a never-reviewed row (a cleared
+  # git-marker, a vault report that predates the history), and a number there would dress up an
+  # unreviewed repo as freshly reviewed. ISO parse is exact and culture-invariant (see above).
   $daysSinceReview = $null
-  if ($lastReviewDate) {
+  if ($lastReviewDate -and -not $neverReviewed) {
     [datetime]$lrd = [datetime]::MinValue
-    if ([datetime]::TryParse($lastReviewDate, [ref]$lrd)) {
+    if ([datetime]::TryParseExact($lastReviewDate, 'yyyy-MM-dd', [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::None, [ref]$lrd)) {
       $daysSinceReview = [int]((Get-Date).Date - $lrd.Date).TotalDays
     }
   }
@@ -422,16 +471,22 @@ function Get-GitSide {
 # with ZERO tracked source — a docs/spec repo (engineering-system), a playbook repo (qa), a CV
 # repo (personal-resumes) — is not code-reviewable, so the never-reviewed floor of 100 must not
 # float it above a genuinely unreviewed code repo. Exposed as hasTrackedSource; SKILL.md §4 voids
-# the floor when false. When a SubsystemPath is given the query is pathspec-scoped to it, so a
-# docs-only subsystem of a code-bearing host is not credited with the host's unrelated source.
+# the floor when false. Tri-state: $null means the ls-files probe itself FAILED (not a repo, bad
+# pathspec, timeout) — that is UNKNOWN, never a verified "no source", and consumers must not read
+# it as $false (review-sweep's runbook STOPs on unknown). When a SubsystemPath is given the query
+# is pathspec-scoped to it, so a docs-only subsystem of a code-bearing host is not credited with
+# the host's unrelated source.
 $sourceExtRegex = '(?:\.(cs|ts|tsx|js|jsx|mjs|cjs|py|go|java|rb|rs|cpp|cc|c|h|hpp|kt|swift|php|scala|sql|ps1|psm1|sh|bicep|vue|svelte|fs|fsx|razor|cshtml|xaml|tf|proto|css|scss|sass|less)$|(?:^|/)Dockerfile(?:\..+)?$|(?:^|/)\.github/workflows/[^/]+\.ya?ml$)'
 function Get-HasTrackedSource {
   param([string]$RepoPath, [string]$SubsystemPath)
-  if (-not $RepoPath) { return $false }
+  if (-not $RepoPath) { return $null }
   $pathspec = if ($SubsystemPath) { @('--', $SubsystemPath) } else { @() }
-  $out = & git -C $RepoPath ls-files @pathspec 2>$null | Where-Object { $_ -match $sourceExtRegex } | Select-Object -First 1
-  if ($LASTEXITCODE -ne 0) { return $false }
-  return [bool]$out
+  # Materialise BEFORE filtering: piping straight into Select-Object -First 1 short-circuits the
+  # pipeline, which makes $LASTEXITCODE unreliable on the success path — and stderr is discarded,
+  # so a failed ls-files would otherwise be indistinguishable from a verified-empty repo.
+  $out = @(& git -C $RepoPath ls-files @pathspec 2>$null)
+  if ($LASTEXITCODE -ne 0) { return $null }
+  return [bool](@($out | Where-Object { $_ -match $sourceExtRegex }).Count)
 }
 
 $results = foreach ($r in $repos) {
@@ -462,7 +517,10 @@ $results = foreach ($r in $repos) {
 # Anything that will not resolve is emitted as unresolved=true, never as a silent frozen row.
 $scanned = @($results | ForEach-Object { $_.repo })
 if (Test-Path $VaultRoot) {
-  $vaultOnly = Get-ChildItem $VaultRoot -Directory | Where-Object { $scanned -notcontains $_.Name }
+  # Newest folder FIRST: the dedup below keeps the first-emitted row per repo+subsystem, and
+  # enumeration order is arbitrary — unsorted, a stale duplicate of a renamed repo could win
+  # over the folder carrying the newest review.
+  $vaultOnly = @(Get-ChildItem $VaultRoot -Directory | Where-Object { $scanned -notcontains $_.Name } | Sort-Object LastWriteTime -Descending)
   # Track outside targets already emitted THIS pass, keyed on repo + subsystem, so two differently
   # named vault folders resolving to the same outside repo (a de-hyphen + a suffix match, or an old
   # and a current folder) do not both emit and double-count it. Distinct subsystems of one host
@@ -479,7 +537,9 @@ if (Test-Path $VaultRoot) {
       # under the old folder name is not left falsely never-reviewed. A resolution WITH a
       # subsystemPath is a DISTINCT subsystem of that host and must still emit its own row.
       if (-not $target.subsystemPath) {
-        $inPath = $results | Where-Object { $_.repo -eq $target.repoName -and -not $_.outsideScanPath } | Select-Object -First 1
+        # Match on the resolved absolute path, not the leaf name: two same-named repos at
+        # different depths of $Path are distinct, and a leaf-name key conflates them.
+        $inPath = $results | Where-Object { -not $_.outsideScanPath -and $_.resolvedPath -eq $target.repoPath } | Select-Object -First 1
         if ($inPath) {
           if (-not $inPath.vault.exists -and $vd.exists) {
             # Carry the declared scope through the backfill too. Without it a scope resolved
@@ -496,8 +556,8 @@ if (Test-Path $VaultRoot) {
       }
       # Second (and later) vault folder resolving to the same outside repo+subsystem: skip. Key on
       # the canonical repoPath (not the leaf repoName) so two same-named repos under different
-      # -RepoRoots are not wrongly merged. (The first-enumerated folder wins; picking the newest
-      # across duplicate folders would need a two-pass restructure and is not done here.)
+      # -RepoRoots are not wrongly merged. $vaultOnly was sorted newest-first above, so the row
+      # that survives this dedup is the folder with the newest review.
       # One effective scope from the two sources: what the report DECLARED (`subsystem:` /
       # an `audit -- <pathspec>` target) and what its file:/// links RESOLVED to. The
       # declaration wins - it is the panel's own statement of scope - but a disagreement is

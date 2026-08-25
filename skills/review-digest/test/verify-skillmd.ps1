@@ -13,6 +13,13 @@ foreach ($needle in 'collect.ps1','themes.json','Review Ledger','propose','cover
                      'handoff','risk','graphify','boundarySha','since the last review') {
   if ($text -notmatch [regex]::Escape($needle)) { throw "SKILL.md missing reference: $needle" }
 }
+# Output files are UTC-timestamped and never overwritten (a bare yyyy-MM-dd name collides on a
+# same-day re-run and silently destroys the first run's report). Pin both halves of the rule.
+foreach ($needle in 'New-Item -ItemType File -ErrorAction Stop','Never overwrite',
+                     'YYYY-MM-DDTHH-mm-ss.fffffffZ') {
+  if ($text -notmatch [regex]::Escape($needle)) { throw "SKILL.md missing never-overwrite output convention: $needle" }
+}
+if ($text -match [regex]::Escape('<today>')) { throw "SKILL.md still names outputs by bare date - same-day re-runs overwrite each other" }
 if ($text -match '(?i)\.claude[\\/]+skills[\\/]+review-digest') {
   throw "SKILL.md must resolve support files from its loaded skill directory"
 }

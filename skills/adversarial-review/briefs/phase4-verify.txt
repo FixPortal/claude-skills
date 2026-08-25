@@ -19,6 +19,12 @@ Do this:
 
 Return exactly one verdict line, then the evidence:
 VERDICT: CONFIRMED | REFUTED | INDETERMINATE
+Then record the evidence identity of what you verified:
+- **Commit:** the `git rev-parse HEAD` of the worktree you probed — the verdict
+  is only evidence for the reviewed commit if it names that commit.
+- **Tree state:** `git status --porcelain` at the end of your run showing no
+  tracked modifications. Verification is read-only; a dirty tree means the
+  evidence and the reviewed code diverged, and the verdict is void.
 - CONFIRMED — name the file:line that proves it and the triggering input.
 - REFUTED — name what is false (no caller, guarded at <file:line>, exception not
   thrown, path unreachable) and the evidence.

@@ -56,7 +56,9 @@
     corpus (governance instruments, specifications, procedures) rather than
     code — it redirects the code-shaped defect classes to their corpus
     analogues and opens the engineering-system dimensions (proportion, evidence
-    adequacy, executability, coverage). Applies to any target, not just `audit`.
+    adequacy, executability, coverage). Applies to any target, not just `audit`,
+    and fronts every phase's brief (Phase 2 gap-hunting, Phase 3 adjudication,
+    Phase 4 verification), so the corpus frame survives the whole pipeline.
 
 .PARAMETER RepoPath
     Repository root. Defaults to the git toplevel of the current directory.
@@ -105,15 +107,27 @@ param(
     [int] $MaxParallel = 5,
     [ValidateRange(60, 86400)]
     [int] $RoundTimeoutSeconds = 2700,
-    # Proceed with a tree-to-tree target on a dirty working tree, recording the omitted
-    # paths instead of stopping. Deliberate scope decision, never a default.
+    # Proceed when the working tree holds paths the resolved diff cannot contain
+    # (uncommitted paths on a tree-to-tree target; untracked files on any target),
+    # recording the omitted paths instead of stopping. Deliberate scope decision,
+    # never a default.
     [switch] $AllowDirty
 )
 
 $ErrorActionPreference = 'Stop'
 $OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 $scriptDir = Split-Path -Parent $PSCommandPath
+# Finding-block splitter shared with test/verify-start-patterns.ps1 (pooling splits on
+# exactly the Phase-1 admission pattern, normalises headings to '### ', and never
+# splits inside a fenced code block).
+. (Join-Path $scriptDir 'pool-findings.ps1')
 $emptyTree = '4b825dc642cb6eb9a060e54bf8d69288fbee4904'
+
+# The canonical clean sentinel (pinned by briefs/phase1-review.txt): a reviewer whose
+# entire reply is this heading PARTICIPATED and found nothing. It counts toward vendor
+# diversity with issuesRaised = 0 and contributes no pooled finding.
+$cleanSentinel = 'No substantive defects'
+$cleanSentinelPattern = "(?m)^\s*(?:[-*+]\s+)?(?:\*\*|__)?#{1,6}\s*$cleanSentinel\s*$"
 
 # Normalize Pathspec: when called via pwsh -File from a subprocess, multi-element arrays
 # can't be passed as separate tokens without binding errors. Callers join with ';' instead.
@@ -122,7 +136,10 @@ if ($Pathspec.Count -eq 1 -and $Pathspec[0] -match ';') {
 }
 
 function Die([string] $msg, [int] $code = 1) {
-    Write-Error $msg
+    # -ErrorAction Continue is load-bearing: under $ErrorActionPreference='Stop' a bare
+    # Write-Error is TERMINATING and throws before `exit $code` runs, collapsing every
+    # distinct code (2-5) into a bare exit 1. Print non-terminating, then exit.
+    Write-Error $msg -ErrorAction Continue
     exit $code
 }
 
@@ -133,7 +150,10 @@ function Die([string] $msg, [int] $code = 1) {
 #      (`-ContextPath 'a','b'`) arrives as the SINGLE token `a,b`. The ';'-join the
 #      callers apply is then a no-op on one element, and every wrapper splits on ';'
 #      and gets one path that cannot exist. Splitting on ',' as well as ';' recovers
-#      the operator's intent instead of propagating it.
+#      the operator's intent instead of propagating it — but only AFTER testing the
+#      whole token as a path in its own right, because a legitimate path can itself
+#      contain a comma and must not be shredded. Segments split on ';' unconditionally;
+#      ',' is a fallback for segments that are not themselves an existing file.
 #   2. A context file that simply is not there. Each wrapper discovers this on its
 #      own, one reviewer at a time, minutes into the run — five identical
 #      "Context file not found" failures across four vendors, which reads like a
@@ -146,9 +166,22 @@ if ($ContextPath) {
     $ContextPath = @(
         $ContextPath |
             Where-Object { $_ } |
-            ForEach-Object { $_ -split '[;,]' } |
-            ForEach-Object { $_.Trim().Trim("'", '"') } |
-            Where-Object { $_ }
+            ForEach-Object {
+                $whole = $_.Trim().Trim("'", '"')
+                if (Test-Path -LiteralPath $whole -PathType Leaf) { $whole }
+                else {
+                    $whole -split ';' |
+                        ForEach-Object { $_.Trim().Trim("'", '"') } |
+                        Where-Object { $_ } |
+                        ForEach-Object {
+                            if (Test-Path -LiteralPath $_ -PathType Leaf) { $_ }
+                            elseif ($_.Contains(',')) {
+                                $_ -split ',' | ForEach-Object { $_.Trim().Trim("'", '"') } | Where-Object { $_ }
+                            }
+                            else { $_ }
+                        }
+                }
+            }
     )
     foreach ($contextFile in $ContextPath) {
         if (-not (Test-Path -LiteralPath $contextFile -PathType Leaf)) {
@@ -239,7 +272,10 @@ else {
     # Nothing enforced it, so an `audit` or an explicit A..B range - both tree-to-tree -
     # excluded uncommitted work with no warning, and the run then reported coverage of a
     # target the reviewers had never fully seen. A bare branch/SHA target diffs against
-    # the working tree and does pick it up, so only the tree-to-tree shapes are gated.
+    # the working tree and picks up uncommitted EDITS to tracked files — but
+    # `git diff <base>` never includes UNTRACKED files at all, so the working-tree
+    # shapes are gated for those too (new files would otherwise be invisible while
+    # status.json reported full coverage).
     # Classify by what git ACTUALLY expands the target to, not by spotting '..' in the
     # string. Observed: `git diff HEAD^!` shows only the committed change and NOT an
     # uncommitted edit, so it is tree-to-tree while matching no '..' pattern. rev-parse
@@ -265,6 +301,24 @@ else {
             Write-Warning "Reviewing a DIRTY tree with a tree-to-tree target: $($dirtyPaths.Count) uncommitted path(s) are NOT under review."
         }
     }
+    else {
+        # Working-tree target: tracked edits are in the diff, untracked files never are.
+        $untracked = @(& git -C $RepoPath ls-files --others --exclude-standard 2>$null | Where-Object { $_ })
+        if ($LASTEXITCODE -ne 0) { Die 'git ls-files failed; cannot establish review scope.' }
+        if ($untracked.Count -gt 0) {
+            $script:dirtyPaths = @($untracked)
+            if (-not $AllowDirty) {
+                Die (
+                    "Working tree has $($untracked.Count) untracked path(s) and a working-tree target's " +
+                    "diff never includes untracked files, so none of them would reach a reviewer:`n  " +
+                    (($dirtyPaths | Select-Object -First 20) -join "`n  ") +
+                    "`nAdd or stash them, or re-run with -AllowDirty to have the omitted paths " +
+                    'recorded in status.json and the judge packet.'
+                ) 4
+            }
+            Write-Warning "Reviewing with $($dirtyPaths.Count) untracked path(s) excluded: a working-tree diff never contains them, so they are NOT under review."
+        }
+    }
 
     if ($Target -eq 'audit') {
         $isAudit = $true
@@ -279,16 +333,23 @@ else {
         $resolvedTargetIdentity = "git:$($targetRevisions -join ',')"
     }
     else {
+        # symbolic-ref yields the REMOTE-TRACKING ref ('origin/main'). Merge-base against
+        # exactly that: stripping the prefix and merging against LOCAL 'main' throws
+        # (`.Trim()` on $null) where no local main exists — worktrees, fresh clones —
+        # and silently diffed against a stale local main everywhere else. The 'origin/'
+        # prefix is stripped only for display.
         $defaultBranch = (& git -C $RepoPath symbolic-ref --short refs/remotes/origin/HEAD 2>$null)
         if ($LASTEXITCODE -ne 0 -or -not $defaultBranch) {
-            $defaultBranch = @('main', 'master') | Where-Object {
+            $defaultBranch = @('origin/main', 'origin/master', 'main', 'master') | Where-Object {
                 (& git -C $RepoPath rev-parse --verify --quiet $_ 2>$null); $LASTEXITCODE -eq 0
             } | Select-Object -First 1
         }
-        if (-not $defaultBranch) { Die 'Could not detect a default branch (no origin/HEAD, no main/master).' }
-        $defaultBranch = ($defaultBranch -replace '^origin/', '').Trim()
-        $base = (& git -C $RepoPath merge-base $defaultBranch HEAD 2>$null).Trim()
-        if (-not $base) { Die "Could not find merge-base of $defaultBranch and HEAD." }
+        if (-not $defaultBranch) { Die 'Could not detect a default branch (no origin/HEAD, no origin/main, no main/master).' }
+        $defaultBranch = ([string]$defaultBranch).Trim()
+        $displayBranch = $defaultBranch -replace '^origin/', ''
+        $base = (& git -C $RepoPath merge-base $defaultBranch HEAD 2>$null)
+        $base = if ($base) { ([string]$base).Trim() } else { $null }
+        if (-not $base) { Die "Could not find merge-base of $displayBranch and HEAD." }
         $baseDiffArgs = @('-U6', $base)
         $resolvedTargetIdentity = "branch:$base..$((& git -C $RepoPath rev-parse HEAD).Trim())"
     }
@@ -312,6 +373,34 @@ if (Test-Path -LiteralPath $statusFile) {
     if (-not $priorStatus.runIdentity -or $priorStatus.runIdentity -cne $runIdentity) {
         Die "WorkDir contains evidence for a different run identity; use a fresh WorkDir instead of mixing repo/ref/diff evidence: $WorkDir" 5
     }
+}
+
+# --- Pre-flight gate ------------------------------------------------------
+# The host is required to run each enabled wrapper's PREFLIGHT_COMMAND (see the
+# wrapper headers and the skill's pre-flight step) BEFORE starting the panel, and to
+# record the outcome as preflight.json. Until such a sentinel existed the driver
+# proceeded identically whether pre-flight had run or not, and an unauthenticated
+# CLI was discovered mid-round, inside the paid fan-out. Contract: preflight.json is
+# a JSON object mapping wrapper name to its result (e.g. { "claude": "pass" }),
+# written into the run root — this WorkDir for a single run, or its PARENT directory
+# for a batch chunk (batch-review.ps1 runs the spine with WorkDir=<RunRoot>/<id>, so
+# one preflight.json at RunRoot covers every chunk). Its content is echoed into
+# status.json for provenance; the driver does not re-run the probes itself.
+$preflightFile = Join-Path $WorkDir 'preflight.json'
+if (-not (Test-Path -LiteralPath $preflightFile)) {
+    $parentPreflight = Join-Path (Split-Path -Parent $WorkDir) 'preflight.json'
+    if (Test-Path -LiteralPath $parentPreflight) { $preflightFile = $parentPreflight }
+}
+if (-not (Test-Path -LiteralPath $preflightFile)) {
+    Die ("No preflight.json in $WorkDir or its parent. Run each enabled wrapper's PREFLIGHT_COMMAND " +
+        '(see the wrapper headers and the skill''s pre-flight step) and record the results as ' +
+        'preflight.json in the run root before starting the panel — an unauthenticated CLI must be ' +
+        'caught before the paid fan-out, not inside it.') 2
+}
+try { $preflight = Get-Content -LiteralPath $preflightFile -Raw | ConvertFrom-Json }
+catch { Die "preflight.json is not valid JSON ($($_.Exception.Message)): $preflightFile" 2 }
+if ($preflight -isnot [System.Management.Automation.PSCustomObject]) {
+    Die "preflight.json must be a JSON object mapping wrapper name to pre-flight result: $preflightFile" 2
 }
 
 Set-Content -LiteralPath $diffFile -Value $raw -Encoding utf8
@@ -390,13 +479,23 @@ if ($PreamblePath) { $phase2 = $preamble + "`n`n" + $phase2 }
 $phase2BriefFile = Join-Path $WorkDir 'phase2-brief.txt'
 Set-Content -LiteralPath $phase2BriefFile -Value $phase2 -Encoding utf8
 
-# Copy the adjudication brief into the work dir so the judge packet is self-contained.
-Copy-Item (Join-Path $briefDir 'phase3-adjudicate.txt') (Join-Path $WorkDir 'phase3-brief.txt') -Force
+# Copy the adjudication and verification briefs into the work dir so the judge
+# packet is self-contained. An explicit -PreamblePath fronts them exactly as it
+# fronts Phase 2: a judge/verifier handed only the code-shaped brief reverts to
+# code-shaped adjudication of a corpus (wrong severity calibration, wrong defect
+# classes) — the frame must survive all four phases, not stop at the pooled rounds.
+$phase3 = Read-Brief 'phase3-adjudicate.txt'
+if ($PreamblePath) { $phase3 = $preamble + "`n`n" + $phase3 }
+Set-Content -LiteralPath (Join-Path $WorkDir 'phase3-brief.txt') -Value $phase3 -Encoding utf8
+
+$phase4 = Read-Brief 'phase4-verify.txt'
+if ($PreamblePath) { $phase4 = $preamble + "`n`n" + $phase4 }
+Set-Content -LiteralPath (Join-Path $WorkDir 'phase4-brief.txt') -Value $phase4 -Encoding utf8
 
 # --- Build a per-reviewer job spec --------------------------------------
 # Introspect each wrapper so we only pass -Effort / -RepoPath to wrappers that
 # actually declare them (Copilot/Gemini do not expose a reasoning-effort flag).
-function Build-Args([object] $r, [string] $wrapper, [string] $instruction, [bool] $withFindings, [string] $phaseLabel) {
+function Build-Args([object] $r, [string] $wrapper, [string] $instruction, [bool] $withFindings, [string] $phaseLabel, [switch] $Fallback) {
     $caps = (Get-Command $wrapper).Parameters.Keys
     # A reviewer marked repoAccess:false gets the compact diff; a repo-aware one keeps the
     # full diff. But the decision follows the EFFECTIVE wrapper, not the manifest entry -
@@ -422,8 +521,13 @@ function Build-Args([object] $r, [string] $wrapper, [string] $instruction, [bool
     # outputTokens,costUsd} per call; one sidecar per reviewer per phase so the
     # metrics writer can sum P1+P2. Claude (B) has no sidecar — its cost is
     # estimated downstream from the blended rate.
+    # A FALLBACK call gets a '-fallback' suffix: derived from reviewer id + phase
+    # alone, the API fallback's sidecar would overwrite the primary's — and a
+    # primary that billed and THEN exited non-zero would lose its record entirely.
+    # The metrics reader sums both when present.
     if ($caps -contains 'UsageSidecarPath') {
-        $a += @('-UsageSidecarPath', (Join-Path $WorkDir ("usage-{0}-{1}.json" -f $r.id, $phaseLabel)))
+        $sidecarName = "usage-{0}-{1}{2}.json" -f $r.id, $phaseLabel, ($Fallback ? '-fallback' : '')
+        $a += @('-UsageSidecarPath', (Join-Path $WorkDir $sidecarName))
     }
     , $a
 }
@@ -450,7 +554,57 @@ function Strip-Preamble([string] $text, [string] $startPattern) {
 # clearly labelled and excluded from every tally.
 $script:offContract = @()
 
-function Invoke-Round([string] $phaseLabel, [string] $startPattern, [bool] $withFindings, [string[]] $ExpectedFIds = @()) {
+# Per-participating-reviewer Phase-2 coverage: which pooled F-ids got a verdict and
+# which were silently passed over. Recorded so the packet/status can distinguish a
+# considered silence (reviewer saw F3 and chose not to contest it) from ABSENCE —
+# an [unanimous] tag must never rest on one vote plus untracked silence.
+$script:p2Coverage = @{}
+
+function Stop-LeftoverReviewerProcesses {
+    # ForEach-Object -Parallel -TimeoutSeconds stops the timed-out ITERATION, not the
+    # child processes it spawned: the wrapper's pwsh.exe and the vendor CLI beneath it
+    # survive as orphans. Nothing tracked them, so a wedged reviewer kept running (and
+    # billing) after its round was declared over. Sweep by command line: every wrapper
+    # invocation this round launched carries this run's WorkDir on its command line
+    # (via -DiffPath / -FindingsPath / -UsageSidecarPath), which no unrelated process
+    # shares. The trailing separator/quote guard keeps a sibling batch chunk whose id
+    # merely EXTENDS ours ('C1' vs 'C1x') from matching. Best-effort: a sweep failure
+    # must never fail the review.
+    if ($IsWindows -eq $false) { return }
+    try {
+        $needle = [regex]::Escape($WorkDir) + '[\\/"\s]'
+        $all = @(Get-CimInstance Win32_Process -ErrorAction Stop |
+            Select-Object ProcessId, ParentProcessId, Name, CommandLine)
+        $roots = @($all | Where-Object {
+            $_.ProcessId -ne $PID -and $_.CommandLine -and $_.CommandLine -match $needle
+        })
+        if (-not $roots) { return }
+        $childrenOf = @{}
+        foreach ($p in $all) {
+            if (-not $childrenOf.ContainsKey($p.ParentProcessId)) { $childrenOf[$p.ParentProcessId] = @() }
+            $childrenOf[$p.ParentProcessId] += $p
+        }
+        $toKill = [System.Collections.Generic.HashSet[int]]::new()
+        $queue = [System.Collections.Generic.Queue[int]]::new()
+        foreach ($r in $roots) { [void]$toKill.Add([int]$r.ProcessId); $queue.Enqueue([int]$r.ProcessId) }
+        while ($queue.Count -gt 0) {
+            $parent = $queue.Dequeue()
+            foreach ($child in @($childrenOf[$parent])) {
+                if ($toKill.Add([int]$child.ProcessId)) { $queue.Enqueue([int]$child.ProcessId) }
+            }
+        }
+        foreach ($target in $toKill) {
+            Stop-Process -Id $target -Force -ErrorAction SilentlyContinue
+        }
+        Write-Warning "Swept $($toKill.Count) leftover reviewer process(es) still running after the round ended (PIDs: $(@($toKill) -join ', '))."
+    }
+    catch {
+        Write-Warning "Leftover reviewer process sweep failed ($($_.Exception.Message)); a timed-out reviewer's processes may still be running."
+    }
+}
+
+function Invoke-Round([string] $phaseLabel, [string] $startPattern, [bool] $withFindings, [string[]] $ExpectedFIds = @(),
+    [string] $AdmissionPattern = '', [string] $AdmissionDescription = '') {
     $jobs = foreach ($r in $reviewers) {
         $wrapper = Resolve-Wrapper $r
         $instruction = if ($withFindings) { $phase2 } else { $phase1 }
@@ -465,7 +619,7 @@ function Invoke-Round([string] $phaseLabel, [string] $startPattern, [bool] $with
                 $fbPath = Join-Path $scriptDir $fbFile
                 if (Test-Path -LiteralPath $fbPath) {
                     $fbWrapper = $fbPath
-                    $fbArgs = (Build-Args $r $fbPath $instruction $withFindings $phaseLabel)
+                    $fbArgs = (Build-Args $r $fbPath $instruction $withFindings $phaseLabel -Fallback)
                 } else {
                     Write-Warning "Reviewer '$($r.id)' fallbackWrapper '$($r.fallbackWrapper)' not found at $fbPath — no fallback."
                 }
@@ -489,6 +643,7 @@ function Invoke-Round([string] $phaseLabel, [string] $startPattern, [bool] $with
     foreach ($j in $jobs) {
         Remove-Item -LiteralPath $j.OutFile -Force -ErrorAction SilentlyContinue
         Remove-Item -LiteralPath (Join-Path $WorkDir ("usage-{0}-{1}.json" -f $j.Id, $phaseLabel)) -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath (Join-Path $WorkDir ("usage-{0}-{1}-fallback.json" -f $j.Id, $phaseLabel)) -Force -ErrorAction SilentlyContinue
     }
 
     Write-Host "[$phaseLabel] running $($jobs.Count) reviewers: $(($jobs.Label) -join ', ') (timeout ${RoundTimeoutSeconds}s)"
@@ -528,6 +683,9 @@ function Invoke-Round([string] $phaseLabel, [string] $startPattern, [bool] $with
     finally {
         $ErrorActionPreference = $previousErrorAction
     }
+    # Whether or not the round timed out, no wrapper child of THIS run should still be
+    # alive once the round returns — sweep any that are (see the function for why).
+    Stop-LeftoverReviewerProcesses
 
     # Say so loudly. A timed-out reviewer is indistinguishable downstream from one that failed
     # fast, and the difference matters: it means the round was cut short, not that a vendor
@@ -538,6 +696,20 @@ function Invoke-Round([string] $phaseLabel, [string] $startPattern, [bool] $with
         Write-Warning ("[$phaseLabel] round hit the ${RoundTimeoutSeconds}s timeout; " +
             "$($missing.Count) reviewer(s) did not report: $($missing -join ', '). " +
             'They are treated as unavailable. Raise -RoundTimeoutSeconds if the diff is genuinely large.')
+    }
+
+    # A fast-failed reviewer leaves a '[reviewer unavailable]' marker in its phase
+    # file; a timed-out one used to leave NOTHING — same unavailability, no evidence.
+    # Synthesise the identical result record for every job that never reported, so
+    # both paths through the failure branch below leave the same marker.
+    # @() first: the pipeline returns a bare scalar when exactly one reviewer
+    # reported, and a scalar does not support +=.
+    $results = @($results)
+    $reportedIds = @($results | ForEach-Object { $_.Id })
+    foreach ($j in @($jobs | Where-Object { $_.Id -notin $reportedIds })) {
+        $evidenceInput = "$($j.RunIdentity)`n$($j.Id)`n$($j.Vendor)`n$($j.PhaseLabel)`n$($j.OutFile)`n"
+        $fingerprint = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($evidenceInput))).ToLowerInvariant()
+        $results += [pscustomobject]@{ Id = $j.Id; Label = $j.Label; Vendor = $j.Vendor; OutFile = $j.OutFile; Out = ''; Exit = -1; ElapsedMs = 0; Degraded = $false; RunIdentity = $j.RunIdentity; EvidenceFingerprint = $fingerprint }
     }
 
     $ok = @()
@@ -572,13 +744,38 @@ function Invoke-Round([string] $phaseLabel, [string] $startPattern, [bool] $with
                 }
                 continue
             }
+            # The start pattern alone is necessary but not SUFFICIENT: it only proves a
+            # section exists. '### Analysis' plus prose used to admit a reply that
+            # contained no finding and no verdict, and the pooled-coverage check merely
+            # warned while $ok grew — so a vendor that contributed nothing still counted
+            # toward minVendors. Admission additionally requires the phase's contract
+            # content: a structured finding field or the clean sentinel (Phase 1), at
+            # least one F# verdict (Phase 2, when there is anything to vote on).
+            if ($AdmissionPattern -and -not ($stripped.Text -match $AdmissionPattern)) {
+                Write-Warning ("[$phaseLabel] reviewer $($res.Id) ($($res.Label)) matched the start pattern but produced no " +
+                    "$AdmissionDescription — narration under a heading is not participation. NOT counted as a " +
+                    'participating vendor; text still forwarded to the judge as unpooled.')
+                Set-Content -LiteralPath $res.OutFile -Value "[reviewer off-contract: no $AdmissionDescription]`n$($stripped.Text)" -Encoding utf8
+                $script:offContract += [pscustomobject]@{
+                    Phase = $phaseLabel; Id = $res.Id; Label = $res.Label
+                    Vendor = $res.Vendor; Text = $stripped.Text
+                }
+                continue
+            }
             # Phase 2 coverage is advisory, not a gate: a reviewer may legitimately have
             # nothing to say about some pooled findings. Surface the number so a reply
             # covering 3 of 17 is visible rather than indistinguishable from a full one.
+            # The uncovered ids are ALSO recorded per reviewer (status.json and the
+            # judge packet) as explicit abstentions, so the judge can tell a considered
+            # silence from absence and never rests [unanimous] on one vote plus silence.
             if ($ExpectedFIds -and $ExpectedFIds.Count -gt 0) {
-                $covered = @($ExpectedFIds | Where-Object { $stripped.Text -match "\b$([regex]::Escape($_))\b" }).Count
-                if ($covered -lt [math]::Ceiling($ExpectedFIds.Count / 2)) {
-                    Write-Warning "[$phaseLabel] reviewer $($res.Id) ($($res.Label)) addressed only $covered of $($ExpectedFIds.Count) pooled findings."
+                $coveredIds = @($ExpectedFIds | Where-Object { $stripped.Text -match "\b$([regex]::Escape($_))\b" })
+                $script:p2Coverage[$res.Id] = [ordered]@{
+                    covered   = $coveredIds
+                    abstained = @($ExpectedFIds | Where-Object { $_ -notin $coveredIds })
+                }
+                if ($coveredIds.Count -lt [math]::Ceiling($ExpectedFIds.Count / 2)) {
+                    Write-Warning "[$phaseLabel] reviewer $($res.Id) ($($res.Label)) addressed only $($coveredIds.Count) of $($ExpectedFIds.Count) pooled findings."
                 }
             }
             $ok += $res
@@ -595,7 +792,8 @@ function Invoke-Round([string] $phaseLabel, [string] $startPattern, [bool] $with
 # repository-backed cross-examination was excluded from the participating-vendor count, leaving
 # status.json reporting four Phase-2 vendors where five reviewers had taken part. Forwarding the
 # text to the judge limited the damage but left every consensus tally wrong for that chunk.
-$p1ok = Invoke-Round 'p1' '^\s*(?:[-*+]\s+)?(?:\*\*|__)?#{1,6}\s' $false
+$p1Admission = "(?:\*\*Severity:\*\*)|$cleanSentinelPattern"
+$p1ok = Invoke-Round 'p1' '^\s*(?:[-*+]\s+)?(?:\*\*|__)?#{1,6}\s' $false @() $p1Admission 'structured finding field or the clean sentinel'
 if (-not $p1ok) { Die 'No reviewer produced Phase 1 findings; cannot continue.' }
 $p1Vendors = ($p1ok.Vendor | Sort-Object -Unique).Count
 if ($p1Vendors -lt $minVendors) {
@@ -609,33 +807,49 @@ if ($p1Vendors -lt $minVendors) {
 }
 
 # --- Pool + anonymise + assign F-ids ------------------------------------
+# Split each participating reviewer's stripped Phase-1 output with the SAME pattern
+# that admitted it (Split-FindingBlocks, pool-findings.ps1): the old pooler opened a
+# block only on the literal '^### ', so admitted forms ('## ', '#### ', '- ### ',
+# '  ### ') pooled ZERO findings while the vendor still counted toward minVendors,
+# and a '### ' line inside a fenced code block split a finding in two. The splitter
+# normalises every heading to canonical '### ' and tracks fence state.
+# Per-reviewer raised counts come from the pooled blocks themselves (off the
+# normalised form), and pooled-map.json records F# -> {id, vendor} so an adjudicated
+# finding has a machine-readable backlink to whoever raised it.
 $findingId = 0
+$raisedById = @{}
+$pooledMap = [ordered]@{}
 $pool = [System.Text.StringBuilder]::new()
 [void]$pool.AppendLine('# Pooled findings (attribution removed)')
 [void]$pool.AppendLine()
 foreach ($res in $p1ok) {
     $text = Get-Content -LiteralPath $res.OutFile -Raw
-    $lines = $text -split "`r?`n"
-    $block = [System.Collections.Generic.List[string]]::new()
-    $flush = {
-        if ($block.Count -gt 0 -and ($block -join '').Trim()) {
-            $script:findingId++
-            # Trim a trailing horizontal-rule separator a reviewer may have placed
-            # between its own findings, so it does not bleed into the pooled block.
-            $body = (($block -join "`n").Trim()) -replace '(\r?\n\s*-{3,}\s*)+$', ''
-            [void]$pool.AppendLine("## F$script:findingId")
-            [void]$pool.AppendLine($body.Trim())
-            [void]$pool.AppendLine()
-        }
-        $block.Clear()
+    $before = $findingId
+    # Assign BEFORE wrapping: @(Split-FindingBlocks ...) captures the returned array
+    # as ONE element instead of its blocks (the single-array pipeline quirk).
+    $findingBlocks = Split-FindingBlocks $text
+    foreach ($finding in @($findingBlocks)) {
+        $body = $finding.Trim()
+        if (-not $body) { continue }
+        # The canonical clean sentinel is PARTICIPATION, not a finding: a reviewer
+        # whose reply is '### No substantive defects' counts toward vendor diversity
+        # with issuesRaised = 0 and contributes nothing to the pool.
+        if ($body -match "(?m)^\s*###\s*$cleanSentinel\s*$") { continue }
+        $findingId++
+        $fid = "F$findingId"
+        # Trim a trailing horizontal-rule separator a reviewer may have placed
+        # between its own findings, so it does not bleed into the pooled block.
+        $body = $body -replace '(\r?\n\s*-{3,}\s*)+$', ''
+        [void]$pool.AppendLine("## $fid")
+        [void]$pool.AppendLine($body.Trim())
+        [void]$pool.AppendLine()
+        $pooledMap[$fid] = [ordered]@{ id = $res.Id; vendor = $res.Vendor }
     }
-    foreach ($ln in $lines) {
-        if ($ln -match '^### ') { & $flush }
-        if ($ln -match '^### ' -or $block.Count -gt 0) { $block.Add($ln) }
-    }
-    & $flush
+    $raisedById[$res.Id] = $findingId - $before
 }
 Set-Content -LiteralPath $pooledFile -Value ($pool.ToString().TrimEnd()) -Encoding utf8
+$pooledMapFile = Join-Path $WorkDir 'pooled-map.json'
+$pooledMap | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath $pooledMapFile -Encoding utf8
 Write-Host "Pooled $findingId findings into $(Split-Path -Leaf $pooledFile)"
 
 # --- Phase 2 -------------------------------------------------------------
@@ -646,11 +860,28 @@ $expectedFIds = if ($findingId -gt 0) { @(1..$findingId | ForEach-Object { "F$_"
 # may be separated by whitespace, which is what `**F12** ... AGREE` needs. Allowing bare
 # `F\d+\s` matched prose such as "F12 and F13 both agree" and "F5 findings were raised", which
 # would admit narration as though it were a verdict block.
-$p2ok = Invoke-Round 'p2' '^\s*(?:[-*+]\s+)?(?:\*\*|__|\*|_)?F\d+(?:(?:\*\*|__|\*|_)\s*[:.\)\s]|\s*[:.\)])|^\s*(?:[-*+]\s+)?(?:\*\*|__)?#{1,6}\s' $true $expectedFIds
-if (-not $p2ok) { Die 'No reviewer produced Phase 2 cross-examinations; cannot continue.' }
-$p2Vendors = ($p2ok.Vendor | Sort-Object -Unique).Count
-if ($p2Vendors -lt $minVendors) {
-    Die "Only $p2Vendors vendor(s) produced Phase 2 cross-examinations (min $minVendors) — this is not an adversarial panel. Re-run this chunk; do not judge it."
+$p2VerdictPattern = '^\s*(?:[-*+]\s+)?(?:\*\*|__|\*|_)?F\d+(?:(?:\*\*|__|\*|_)\s*[:.\)\s]|\s*[:.\)])'
+if ($findingId -eq 0) {
+    # Every participating reviewer returned the clean sentinel (or nothing poolable):
+    # the pool is EMPTY but the panel DID convene. That is a clean chunk, not a
+    # failure — terminate cleanly with zero findings instead of running a Phase 2 over
+    # an empty pool. batch-review.ps1 tells this apart from a failed chunk via
+    # status.json's pooledCount.
+    Write-Host 'All participating reviewers reported no substantive defects — the pool is empty; skipping Phase 2 and terminating cleanly.'
+    $p2ok = @()
+    $p2Vendors = 0
+}
+else {
+    # Admission requires at least one valid F# verdict: with findings on the table, a
+    # heading plus prose ('### Analysis') is not cross-examination and must not count
+    # toward minVendors.
+    $p2Admission = "(?m)$p2VerdictPattern"
+    $p2ok = Invoke-Round 'p2' "$p2VerdictPattern|^\s*(?:[-*+]\s+)?(?:\*\*|__)?#{1,6}\s" $true $expectedFIds $p2Admission 'F# verdict'
+    if (-not $p2ok) { Die 'No reviewer produced Phase 2 cross-examinations; cannot continue.' }
+    $p2Vendors = ($p2ok.Vendor | Sort-Object -Unique).Count
+    if ($p2Vendors -lt $minVendors) {
+        Die "Only $p2Vendors vendor(s) produced Phase 2 cross-examinations (min $minVendors) — this is not an adversarial panel. Re-run this chunk; do not judge it."
+    }
 }
 
 # --- Per-chunk reviewer metrics (telemetry) -----------------------------
@@ -735,27 +966,40 @@ try {
         $degraded = [bool](($p1res.Degraded) -or ($p2res.Degraded))
 
         $p1File = Join-Path $WorkDir ("p1-{0}.txt" -f $r.id)
-        $raised = if (Test-Path -LiteralPath $p1File) {
-            @(Get-Content -LiteralPath $p1File | Where-Object { $_ -match '^### ' }).Count
-        } else { 0 }
+        # Raised counts come from the pooling pass itself (the normalised '### '
+        # blocks), not from re-counting the literal heading in the phase file — the
+        # old count missed every admitted non-'### ' heading form and would count a
+        # clean-sentinel heading as a finding.
+        $raised = [int]($raisedById[$r.id] ?? 0)
 
+        # Sidecars are read UNCONDITIONALLY: a fallback call's spend lives in
+        # usage-<id>-<phase>-fallback.json (summed alongside the primary's), and an
+        # off-contract reviewer may still have billed real tokens before its reply
+        # was rejected — hard-coding zeros on that branch would erase real spend.
         $sidecars = @(
             (Read-UsageSidecar (Join-Path $WorkDir ("usage-{0}-p1.json" -f $r.id)))
+            (Read-UsageSidecar (Join-Path $WorkDir ("usage-{0}-p1-fallback.json" -f $r.id)))
             (Read-UsageSidecar (Join-Path $WorkDir ("usage-{0}-p2.json" -f $r.id)))
+            (Read-UsageSidecar (Join-Path $WorkDir ("usage-{0}-p2-fallback.json" -f $r.id)))
         ) | Where-Object { $_ }
 
-        # A reviewer that produced NO usable output in either phase ran nothing.
-        # It must record zeros, not an estimate. The old code fell straight into
-        # the sidecar-less branch below and billed it $estTokens * 2 — the DIFF's
-        # own token estimate — so a dead reviewer was indistinguishable from a
-        # live one, and a chunk whose OpenAI call 401'd logged the exact same
-        # figure as the two Claude reviewers (observed: 23760 three times over).
-        # Fabricated metrics for a reviewer that never spoke are worse than no
-        # metrics: they make a broken panel read as a working one.
+        # A reviewer that produced NO usable output in either phase AND left no usage
+        # sidecar ran nothing. It must record zeros, not an estimate. The old code
+        # fell straight into the sidecar-less branch below and billed it
+        # $estTokens * 2 — the DIFF's own token estimate — so a dead reviewer was
+        # indistinguishable from a live one, and a chunk whose OpenAI call 401'd
+        # logged the exact same figure as the two Claude reviewers (observed: 23760
+        # three times over). Fabricated metrics for a reviewer that never spoke are
+        # worse than no metrics: they make a broken panel read as a working one.
+        # But the zero branch used to fire on $phasesRun alone, BEFORE any sidecar
+        # was read — a reviewer whose reply went off-contract after a billed call
+        # (or whose primary billed and only the fallback failed) had that real spend
+        # overwritten with zeros and no costUnknown key at all. Zeros are now forced
+        # only when nothing ran AND nothing billed.
         $phasesRun = @(@($p1res, $p2res) | Where-Object { $_ }).Count
         $telemetryModel = Resolve-TelemetryModel $r
 
-        if ($phasesRun -eq 0) {
+        if ($phasesRun -eq 0 -and -not $sidecars) {
             [ordered]@{
                 reviewer         = $r.vendor
                 role             = 'reviewer'
@@ -764,6 +1008,7 @@ try {
                 outputTokens     = 0
                 costUsd          = 0.0
                 costEstimated    = $false
+                costUnknown      = $false
                 failed           = $true
                 degraded         = $degraded
                 reviewDurationMs = $durationMs
@@ -822,7 +1067,10 @@ try {
                 costUsd          = [Math]::Round($cost, 6)
                 costEstimated    = $estimated
                 costUnknown      = $costUnknown
-                failed           = $false
+                # A reviewer that billed (sidecar present) but never made the
+                # participating set — off-contract in both phases — still failed
+                # the round; its spend is real either way and is recorded above.
+                failed           = ($phasesRun -eq 0)
                 degraded         = $degraded
                 reviewDurationMs = $durationMs
                 issuesRaised     = $raised
@@ -848,12 +1096,13 @@ $packet = [System.Text.StringBuilder]::new()
 $compactNote = if ($compactDiffFile) { " · compact diff: $($repoBlindIds -join '+')" } else { '' }
 [void]$packet.AppendLine("Target: ``$($Target ? $Target : '(branch vs base)')`` · added lines: $addedLines · total lines: $totalLines · est. tokens: $estTokens$compactNote · audit: $isAudit")
 if ($dirtyPaths.Count -gt 0) {
-    [void]$packet.AppendLine("NOT REVIEWED — $($dirtyPaths.Count) uncommitted path(s) excluded by this tree-to-tree target: $(($dirtyPaths | Select-Object -First 30) -join ', ')")
+    [void]$packet.AppendLine("NOT REVIEWED — $($dirtyPaths.Count) uncommitted/untracked path(s) the resolved diff cannot contain: $(($dirtyPaths | Select-Object -First 30) -join ', ')")
 }
 [void]$packet.AppendLine("Reviewers (Phase 1): $(($p1ok.Label) -join ', ')")
 [void]$packet.AppendLine()
 [void]$packet.AppendLine('Adjudicate with `briefs/phase3-adjudicate.txt` (copied here as `phase3-brief.txt`).')
-[void]$packet.AppendLine('Then verify Highs + contested findings with `briefs/phase4-verify.txt` (Phase 4) before publishing.')
+[void]$packet.AppendLine('Then verify every Critical, every High and every contested finding with `briefs/phase4-verify.txt` (Phase 4, copied here as `phase4-brief.txt`) before publishing.')
+[void]$packet.AppendLine('If you run the optional Phase-3.5 judge audit (`briefs/phase3.5-judge-audit.txt`), hand the auditor THIS PACKET as well as the adjudicated report — the attributed Phase-1 section below is what lets it catch a [majority] tag on a single-vendor finding.')
 [void]$packet.AppendLine('The diff under review is `review-diff.txt`; read the repo to settle contested mechanisms.')
 [void]$packet.AppendLine()
 [void]$packet.AppendLine('---')
@@ -872,9 +1121,21 @@ foreach ($res in $p1ok) {
 [void]$packet.AppendLine()
 [void]$packet.AppendLine('---')
 [void]$packet.AppendLine('## Phase 2 — cross-examination (per reviewer)')
+if ($findingId -eq 0) {
+    [void]$packet.AppendLine()
+    [void]$packet.AppendLine('Every participating reviewer reported the clean sentinel — there was nothing to cross-examine, so Phase 2 did not run.')
+}
 foreach ($res in $p2ok) {
     [void]$packet.AppendLine()
     [void]$packet.AppendLine("### Reviewer $($res.Id) — $($res.Label)")
+    $cov = $script:p2Coverage[$res.Id]
+    if ($cov -and $cov.abstained.Count -gt 0) {
+        # Explicit abstention: this reviewer saw these pooled findings and recorded
+        # no verdict on them. Considered silence, not absence — do not read an
+        # [unanimous] or [majority] tag as carrying this vendor's vote on these ids.
+        [void]$packet.AppendLine()
+        [void]$packet.AppendLine("Abstained (no verdict recorded): $($cov.abstained -join ', ')")
+    }
     [void]$packet.AppendLine()
     [void]$packet.AppendLine((Get-Content -LiteralPath $res.OutFile -Raw).TrimEnd())
 }
@@ -917,13 +1178,22 @@ $status = [ordered]@{
     workDir         = $WorkDir
     diffFile        = $diffFile
     pooledFile      = $pooledFile
+    pooledMap       = $pooledMapFile
     judgePacket     = $packetFile
     pooledCount     = $findingId
+    preflight       = $preflight
     offContract     = @($script:offContract | ForEach-Object { @{ phase = $_.Phase; id = $_.Id; vendor = $_.Vendor } })
     phase1Reviewers = @($p1ok | ForEach-Object { @{ id = $_.Id; label = $_.Label; vendor = $_.Vendor } })
     phase2Reviewers = @($p2ok | ForEach-Object { @{ id = $_.Id; label = $_.Label; vendor = $_.Vendor } })
+    # Per participating Phase-2 reviewer, the pooled ids it recorded NO verdict on.
+    # An explicit abstention is considered silence; without this record a consensus
+    # tag could rest on one vote plus untracked absence.
+    phase2Abstentions = @($p2ok | ForEach-Object {
+            $cov = $script:p2Coverage[$_.Id]
+            @{ id = $_.Id; vendor = $_.Vendor; abstained = @($cov ? $cov.abstained : @()) }
+        })
     vendorsP1       = $p1Vendors
-    nextSteps       = @('adjudicate (phase3-brief.txt)', 'verify Highs+contested (phase4-verify.txt)', 'synthesise if multi-chunk', 'persist to vault')
+    nextSteps       = @('adjudicate (phase3-brief.txt)', 'verify every Critical, every High and every contested finding (phase4-brief.txt)', 'optionally judge-audit with briefs/phase3.5-judge-audit.txt fed judge-packet.md', 'synthesise if multi-chunk', 'persist to vault')
 }
 $status | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $statusFile -Encoding utf8
 

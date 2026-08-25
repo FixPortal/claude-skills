@@ -23,6 +23,9 @@ $root = Join-Path ([IO.Path]::GetTempPath()) ('agy-review-test-' + [guid]::NewGu
 $fakeBin = Join-Path $root 'bin'
 New-Item -ItemType Directory -Path $fakeBin -Force | Out-Null
 
+# Capture BEFORE try: a throw during fixture setup must not leave the finally
+# assigning $null back into $env:PATH.
+$oldPath = $env:PATH
 try {
     $brief = Join-Path $root 'brief.txt'
     $diff = Join-Path $root 'diff.txt'
@@ -46,7 +49,6 @@ try {
         "'FAKE REVIEW'"
     )
 
-    $oldPath = $env:PATH
     $env:PATH = $fakeBin + [IO.Path]::PathSeparator + $oldPath
     $resolvedAgy = & pwsh -NoProfile -Command '(Get-Command agy).Source'
     if ($resolvedAgy -ne (Join-Path $fakeBin 'agy.ps1')) { throw "test double not resolved: $resolvedAgy" }
@@ -67,6 +69,15 @@ try {
     if ($usageJson.inputTokens -ne 0 -or $usageJson.outputTokens -ne 0 -or $usageJson.costUsd -ne 0) {
         throw 'agy usage sidecar must report unknown usage as zero'
     }
+
+    # -Effort must drive --effort when the model name carries no effort suffix:
+    # the case above lets the -high suffix win, so it never exercises the mapping.
+    & pwsh -NoProfile -File $wrapper -InstructionPath $brief -DiffPath $diff `
+        -ContextPath "$context1;$context2" -Model 'gemini-3.1-pro' -Effort low `
+        -OutPath $out
+    if ($LASTEXITCODE -ne 0) { throw "wrapper exited $LASTEXITCODE on the unsuffixed-model run" }
+    $argsText = Get-Content $capture -Raw
+    if ($argsText -notlike '*--effort low*') { throw "-Effort low was not passed through for an unsuffixed model: $argsText" }
 
     'agy-review.ps1 OK'
 }

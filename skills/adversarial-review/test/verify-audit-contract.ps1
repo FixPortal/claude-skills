@@ -155,4 +155,50 @@ if ($gemini -notmatch 'NewGuid\(\).*paused|paused\.\$PID.*NewGuid' -or
     throw 'gemini OAuth shadowing must use a unique backup and strict restore'
 }
 
+# The driver must admit the canonical clean sentinel the Phase-1 brief pins: a review
+# that finds nothing replies with exactly that heading and counts as participation
+# (issuesRaised=0, failed=$false), so an all-clean pool terminates cleanly instead of Die.
+$phase1Brief = Get-Content (Join-Path $root 'briefs' 'phase1-review.txt') -Raw
+foreach ($needle in '### No substantive defects') {
+    if ($phase1Brief -notmatch [regex]::Escape($needle)) { throw "phase1-review.txt does not pin the clean sentinel: $needle" }
+    if ($driver -notmatch [regex]::Escape($needle)) { throw "run-review.ps1 does not admit the clean sentinel as participation: $needle" }
+}
+
+# The -PreamblePath preamble must front ALL FOUR phase briefs. Phases 3/4 used to get the
+# raw brief, so the judge and verifier worked a code-shaped frame on a corpus target.
+foreach ($n in 1..4) {
+    if ($driver -notmatch ('\$phase' + $n + '\s*=\s*\$preamble \+')) {
+        throw "run-review.ps1 does not front the -PreamblePath preamble onto the phase $n brief"
+    }
+}
+
+# Phase 4 scope is "Every Critical, every High and every contested finding" — the judge
+# packet line used to drop Critical, so the highest-severity findings could skip
+# verification entirely.
+foreach ($needle in 'Every Critical, every High and every contested finding') {
+    if ($driver -notmatch [regex]::Escape($needle)) { throw "run-review.ps1 judge packet does not scope Phase 4 over Criticals: $needle" }
+    if ($main -notmatch [regex]::Escape($needle)) { throw "SKILL.md does not scope Phase 4 over Criticals: $needle" }
+    if ($methodology -notmatch [regex]::Escape($needle)) { throw "METHODOLOGY-v2.md does not scope Phase 4 over Criticals: $needle" }
+}
+
+# Die() collapsed exit codes 2-5 to 1: a bare Write-Error under $ErrorActionPreference=Stop
+# throws before `exit $code` runs. Every Write-Error feeding an exit must continue first.
+# Anchored at line start so the prose comments explaining this do not trip it.
+if ($driver -match '(?m)^\s*Write-Error(?![^\r\n]*-ErrorAction\s+Continue)') {
+    throw 'run-review.ps1 has a Write-Error without -ErrorAction Continue; it throws before exit $code and collapses the exit code'
+}
+
+# Every participant record that emits cost fields must set costUnknown. The
+# failed-reviewer branch (costEstimated = $false) used to omit it, so a wrapper outage
+# reached the dashboard as a measured 0.0 instead of UNKNOWN.
+if ($driver -notmatch '(?s)costEstimated\s*=\s*\$false.{0,120}?costUnknown\s*=') {
+    throw 'run-review.ps1 emits cost fields in a participant branch without setting costUnknown'
+}
+
+# Provenance and pre-flight artefacts the host/judge side now depends on: the pooled map
+# makes IssuesAccepted derivable; preflight.json is the evidence pre-flight ran.
+foreach ($needle in 'pooled-map.json', 'preflight.json') {
+    if ($driver -notmatch [regex]::Escape($needle)) { throw "run-review.ps1 does not honour the run-root artefact contract: $needle" }
+}
+
 "adversarial-review audit contract OK — $words words"
