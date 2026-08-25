@@ -148,6 +148,17 @@ if ($contextPaths) {
 
 $stdin = $sb.ToString()
 
+# Validate -RepoPath BEFORE creating the scratch dir, so the exit-2 path cannot
+# leak it (the finally that removes $scratch only covers what follows).
+$repoResolved = $null
+if ($RepoPath) {
+    $repoResolved = (Resolve-Path -LiteralPath $RepoPath -ErrorAction SilentlyContinue)?.Path
+    if (-not $repoResolved) {
+        Write-Error "RepoPath not found: $RepoPath"
+        exit 2
+    }
+}
+
 # Run from a throwaway working directory so the repo's own CLAUDE.md / project
 # context cannot bias the review. --permission-mode plan = read-only (no edit,
 # no execute). Tools stay read-only; repo access is opt-in via -RepoPath.
@@ -171,12 +182,7 @@ $claudeArgs = @(
     '--permission-mode', 'plan'
 )
 
-if ($RepoPath) {
-    $repoResolved = (Resolve-Path -LiteralPath $RepoPath -ErrorAction SilentlyContinue)?.Path
-    if (-not $repoResolved) {
-        Write-Error "RepoPath not found: $RepoPath"
-        exit 2
-    }
+if ($repoResolved) {
     # Read-only repo access: the reviewer may read surrounding context but the
     # plan permission mode still forbids any mutation.
     $claudeArgs += @('--add-dir', $repoResolved, '--tools', 'Read,Grep,Glob')

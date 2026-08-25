@@ -22,6 +22,8 @@ foreach ($s in @($batch, $agg)) {
     if (-not (Test-Path -LiteralPath $s)) { throw "script under test not found: $s" }
 }
 
+$savedApiKey = $env:OBSERVATORY_API_KEY
+$savedUrl = $env:OBSERVATORY_URL
 $env:OBSERVATORY_API_KEY = ''
 $env:OBSERVATORY_URL     = ''
 
@@ -399,5 +401,13 @@ try {
     "aggregate-and-emit.ps1 OK — exit codes 2 (no emitter) and 3 (no metrics) stay distinct from 1"
 }
 finally {
+    # Restore the caller's telemetry configuration; assigning $null removes the
+    # variable, so an originally-unset var is restored to unset.
+    $env:OBSERVATORY_API_KEY = $savedApiKey
+    $env:OBSERVATORY_URL = $savedUrl
     Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
 }
+
+# The exit-2 child above is asserted, not fatal — clear its native status so a caller
+# that checks $LASTEXITCODE after a PASS does not read the child's deliberate failure.
+$global:LASTEXITCODE = 0

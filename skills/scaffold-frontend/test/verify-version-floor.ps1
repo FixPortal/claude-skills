@@ -30,6 +30,29 @@ if ($npmMajor -lt 11) {
     return
 }
 
+# A registry blip must not fail the required gate on a PR that could not have caused it,
+# so the npm call retries with backoff, and a failure whose output is network-shaped means
+# "registry unreachable" (SKIP), not "floors broken". A genuine resolution failure -
+# ERESOLVE, a peer conflict, a yanked version - still throws.
+function Test-RegistryUnreachable([string] $Output) {
+    return $Output -match '(?i)EAI_AGAIN|ENOTFOUND|ECONNREFUSED|ECONNRESET|ETIMEDOUT|ESOCKETTIMEDOUT|EAI_FAIL|fetch failed|network request to .* failed'
+}
+
+function Invoke-NpmWithRetry([string] $What, [string[]] $Arguments) {
+    # Returns the captured output on success, $null when the registry stayed unreachable
+    # through every retry (the caller must SKIP), and throws on any other failure.
+    $output = ''
+    foreach ($attempt in 1..3) {
+        $output = & npm @Arguments 2>&1 | Out-String
+        if ($LASTEXITCODE -eq 0) { return $output }
+        if (-not (Test-RegistryUnreachable $output)) {
+            throw "$What failed (exit $LASTEXITCODE):`n$output"
+        }
+        if ($attempt -lt 3) { Start-Sleep -Seconds ([math]::Pow(2, $attempt)) }
+    }
+    return $null
+}
+
 # Return the FLOOR itself - a bare version - not the documented RANGE. Scraping the cell
 # verbatim yielded '^6.0.3', and npm resolves a caret to the newest matching release, so
 # the install proved only "some 6.x works with typescript-eslint". The floor is the number
@@ -70,9 +93,10 @@ try {
         throw "Vitest $(Get-Floor 'vitest') and @vitest/coverage-v8 $(Get-Floor '@vitest/coverage-v8') must share their exact peer release"
     }
 
-    $output = & npm install --prefix $root --package-lock-only --ignore-scripts --no-audit --no-fund 2>&1 | Out-String
-    if ($LASTEXITCODE -ne 0) {
-        throw "documented TypeScript/typescript-eslint floors do not resolve:`n$output"
+    $output = Invoke-NpmWithRetry 'documented TypeScript/typescript-eslint floors resolution' @('install', '--prefix', $root, '--package-lock-only', '--ignore-scripts', '--no-audit', '--no-fund')
+    if ($null -eq $output) {
+        Write-Host 'SKIP: npm registry unreachable after retries; documented floors not resolved'
+        return
     }
 
     # The documented TypeScript range must not admit a version typescript-eslint's peer

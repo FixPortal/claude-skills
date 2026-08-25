@@ -10,7 +10,8 @@
     and the warnings-as-errors policy.
 
     READ-ONLY. Writes nothing inside the audited repository. Captures `git status`
-    so the caller can prove nothing mutated.
+    so the caller can prove nothing mutated; when that capture itself fails, `Mutated`
+    is null (unknown) and `GitStatusFailed` is set - never false "proof".
 
     It reports raw facts. It does not resolve effective severity or judge findings —
     that is the agent's job, and it needs the real overload/provenance evidence the
@@ -191,13 +192,22 @@ function Group-FilesByOwningRepo {
 function Get-ProjectDocuments {
     <# Enumerate and parse each project/props/targets file ONCE. Package references and
        policy properties are both read from this single parsed set, rather than each
-       walking (and re-parsing) the whole tree independently. #>
-    param([object[]] $Files, [string] $Repo)
+       walking (and re-parsing) the whole tree independently.
+
+       A parse failure is recorded in $ParseErrors, not dropped silently: an unparsed
+       file's PackageReferences and policy properties must be told apart from a repo
+       that declares none - the same discipline UnreadablePaths carries for the walk. #>
+    param([object[]] $Files, [string] $Repo, [System.Collections.Generic.List[string]] $ParseErrors)
 
     $docs = [System.Collections.Generic.List[object]]::new()
     foreach ($file in ($Files | Where-Object { $_.Name -match $ProjectFilePattern })) {
         try { [xml] $xml = Get-Content -LiteralPath $file.FullName -Raw }
-        catch { continue }
+        catch {
+            if ($null -ne $ParseErrors) {
+                $ParseErrors.Add("$([IO.Path]::GetRelativePath($Repo, $file.FullName)): $($_.Exception.Message)")
+            }
+            continue
+        }
         $docs.Add([pscustomobject]@{
             Xml      = $xml
             Relative = [IO.Path]::GetRelativePath($Repo, $file.FullName)
@@ -213,7 +223,11 @@ function Get-PackageRefs {
     foreach ($doc in $Documents) {
         foreach ($kind in 'PackageReference', 'PackageVersion', 'GlobalPackageReference') {
             foreach ($node in $doc.Xml.SelectNodes("//*[local-name()='$kind']")) {
+                # Update= matters as much as Include=: under Central Package Management a
+                # `PackageReference Update="X" Version="..."` is a version override, and
+                # reading Include alone would make those overrides invisible.
                 $id = $node.GetAttribute('Include')
+                if (-not $id) { $id = $node.GetAttribute('Update') }
                 if (-not $id) { continue }
                 $refs.Add([pscustomobject]@{
                     Kind    = $kind
@@ -330,7 +344,8 @@ function Get-RepoInventory {
             ForEach-Object { [IO.Path]::GetRelativePath($Repo, $_.FullName) }
     )
 
-    $documents = Get-ProjectDocuments -Files $files -Repo $Repo
+    $parseErrors = [System.Collections.Generic.List[string]]::new()
+    $documents = Get-ProjectDocuments -Files $files -Repo $Repo -ParseErrors $parseErrors
     $refs      = Get-PackageRefs -Documents $documents
 
     # Anything that plausibly ships analyzers, plus every GlobalPackageReference:
@@ -349,6 +364,14 @@ function Get-RepoInventory {
 
     $after = Get-GitStatus -Repo $Repo
 
+    # A failed capture is $null, and $null -eq $null, so joining both nulls would
+    # compare equal and emit Mutated=$false -- an unreadable `git status` rendered as
+    # PROOF of non-mutation. Mutated is $null (unknown) unless both captures read.
+    $gitStatusFailed = ($null -eq $before -or $null -eq $after)
+    if ($gitStatusFailed) {
+        Write-Warning "git status unreadable in '$Repo'; mutation cannot be proven, so Mutated is null - not false."
+    }
+
     return [pscustomobject]@{
         Repository          = $Repo
         SelectedSdk         = $sdk
@@ -360,7 +383,11 @@ function Get-RepoInventory {
         AllPackageRefs      = $refs
         GitStatusBefore     = $before
         GitStatusAfter      = $after
-        Mutated             = (($before -join "`n") -ne ($after -join "`n"))
+        GitStatusFailed     = $gitStatusFailed
+        Mutated             = if ($gitStatusFailed) { $null } else { (($before -join "`n") -ne ($after -join "`n")) }
+        # Non-empty means a project file could not be parsed; its package references and
+        # policy properties are UNKNOWN, not absent. Treat like UnreadablePaths.
+        ParseErrors         = @($parseErrors)
     }
 }
 

@@ -9,7 +9,7 @@ foreach ($needle in 'supplied findings or content', 'Do not use for discovering,
     if ($main -notmatch [regex]::Escape($needle)) { throw "missing selector boundary: $needle" }
 }
 
-foreach ($name in 'conventions.md','templates.md','report-shape.md','common-mistakes.md') {
+foreach ($name in 'conventions.md','templates.md','report-shape.md','common-mistakes.md','diagram-renderers.md') {
     if (-not (Test-Path (Join-Path $root "references" "$name"))) { throw "missing reference: $name" }
     # The SKILL.md -> references/ split left "above"/"below" pointers behind in files where
     # the target no longer sits above or below anything - the sub-templates moved to

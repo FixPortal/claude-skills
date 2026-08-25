@@ -21,13 +21,13 @@
       * it runs from a throwaway scratch working directory, never the repo, so a
         stray write lands in scratch, not source;
       * the brief / diff / findings / context are COPIED into that scratch dir and
-        the model is told to read them there — the repo is NOT added to the
-        workspace unless -RepoPath is explicitly supplied (repo-aware opt-in);
+        the model is told to read them there — the repo is NEVER added to the
+        workspace;
       * the prompt hard-forbids Edit/Write/Bash and any mutating tool.
-    A repo-aware run (-RepoPath) adds the repo via --add-dir; because the global
-    mode is yolo the guarantee there is prompt-plus-git-tree (any accidental write
-    is detectable/revertable), not a hard sandbox. Prefer the default (repo-blind
-    + -ContextPath) unless call-path tracing is genuinely needed.
+    -RepoPath is REFUSED outright: Kimi has no per-invocation read-only mode, so
+    --add-dir would mount the live tree under the global yolo permission mode
+    with no sandbox at all. Use -ContextPath to supply the repo files the review
+    needs.
 
     Used for Phase 1 (blind review, -DiffPath) and Phase 2 (cross-examination,
     -DiffPath and -FindingsPath). Either phase may also pass -ContextPath.
@@ -63,8 +63,10 @@ param(
 
     [string] $Model = 'kimi-code/kimi-for-coding',
 
-    # Optional read-only repository root. When set, the repo is added to the Kimi
-    # workspace (--add-dir) for call-path tracing. See the READ-ONLY POSTURE note.
+    # Accepted for contract symmetry and REFUSED: Kimi has no per-invocation
+    # read-only mode, so mounting the repo via --add-dir under the global yolo
+    # permission mode would hand the reviewer a writable live tree. Supply the
+    # needed repo files via -ContextPath instead. See the READ-ONLY POSTURE note.
     [string] $RepoPath,
 
     [string] $Effort,           # accepted for contract symmetry; kimi has no per-invocation effort flag
@@ -103,25 +105,44 @@ if ([string]::IsNullOrWhiteSpace($Instruction)) {
     Write-Error 'Provide the review instruction via -Instruction or -InstructionPath.'; exit 2
 }
 
+# Refuse repo access outright (see READ-ONLY POSTURE): with no per-invocation
+# read-only mode, --add-dir under global yolo hands the reviewer the live tree.
+if ($RepoPath) {
+    Write-Error '-RepoPath is not supported by this wrapper: Kimi has no read-only mode, so --add-dir would mount the writable live tree. Pass the needed repo files via -ContextPath.'
+    exit 2
+}
+
+# Validate EVERY supplied path up front (symmetric with the sibling wrappers'
+# Read-InputFile contract): a missing findings/context file must fail the call,
+# not be silently dropped from the review minutes in.
+if (-not (Test-Path -LiteralPath $DiffPath -PathType Leaf)) {
+    Write-Error "Diff file not found: $DiffPath"; exit 2
+}
+if ($FindingsPath -and -not (Test-Path -LiteralPath $FindingsPath -PathType Leaf)) {
+    Write-Error "Findings file not found: $FindingsPath"; exit 2
+}
+$contextPaths = @($ContextPath | ForEach-Object { $_ -split ';' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+foreach ($p in $contextPaths) {
+    if (-not (Test-Path -LiteralPath $p -PathType Leaf)) {
+        Write-Error "Context file not found: $p"; exit 2
+    }
+}
+
 # --- Hermetic scratch workspace: copy the inputs in, point Kimi at them ------
 $work = Join-Path ([System.IO.Path]::GetTempPath()) ("kimi-review-" + [System.IO.Path]::GetRandomFileName())
 New-Item -ItemType Directory -Force -Path $work | Out-Null
 try {
     Set-Content -LiteralPath (Join-Path $work 'brief.txt') -Value $Instruction -Encoding utf8
-    # Fail fast: a bad -DiffPath must NOT launch Kimi against a missing diff.
     Copy-Item -LiteralPath $DiffPath -Destination (Join-Path $work 'review-diff.txt') -Force -ErrorAction Stop
-    if ($FindingsPath) { Copy-Item -LiteralPath $FindingsPath -Destination (Join-Path $work 'pooled-findings.txt') -Force }
+    if ($FindingsPath) { Copy-Item -LiteralPath $FindingsPath -Destination (Join-Path $work 'pooled-findings.txt') -Force -ErrorAction Stop }
 
-    $contextPaths = @($ContextPath | ForEach-Object { $_ -split ';' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
     $ctxDir = Join-Path $work 'context'
     if ($contextPaths) {
         New-Item -ItemType Directory -Force -Path $ctxDir | Out-Null
         $i = 0
         foreach ($p in $contextPaths) {
-            if (Test-Path -LiteralPath $p -PathType Leaf) {
-                Copy-Item -LiteralPath $p -Destination (Join-Path $ctxDir ("{0:D2}_{1}" -f $i, (Split-Path $p -Leaf))) -Force
-                $i++
-            }
+            Copy-Item -LiteralPath $p -Destination (Join-Path $ctxDir ("{0:D2}_{1}" -f $i, (Split-Path $p -Leaf))) -Force -ErrorAction Stop
+            $i++
         }
     }
 
@@ -134,26 +155,11 @@ try {
     [void]$pb.AppendLine('The change under review is review-diff.txt in the current directory.')
     if ($FindingsPath) { [void]$pb.AppendLine('The pooled findings to cross-examine are in pooled-findings.txt in the current directory.') }
     if ($contextPaths)  { [void]$pb.AppendLine('Supporting read-only context files (NOT under review) are in the context/ subdirectory.') }
-    if ($RepoPath)      { [void]$pb.AppendLine("You may also read the repository at $RepoPath for surrounding context; do not modify it.") }
     [void]$pb.AppendLine()
     [void]$pb.AppendLine('Output ONLY the findings in the exact format the brief requires. No preamble, no narration.')
     $prompt = $pb.ToString()
 
     $kimiArgs = @('-p', $prompt, '--model', $Model, '--output-format', 'stream-json')
-    if ($RepoPath) {
-        # A supplied -RepoPath must be a real directory — reject a mistyped path
-        # rather than silently dropping --add-dir and reviewing blind. NOTE: Kimi
-        # has no hard read-only mode, so --add-dir mounts the live tree under the
-        # global yolo permission mode; the reviewer ships repoAccess=false for
-        # this reason (the driver does not pass -RepoPath by default). When it IS
-        # requested the guard is the read-only prompt + the git working tree
-        # (accidental writes are detectable/revertable), NOT a sandbox. A
-        # disposable read-only snapshot would be stronger; deferred by design.
-        if (-not (Test-Path -LiteralPath $RepoPath -PathType Container)) {
-            Write-Error "RepoPath is not an existing directory: $RepoPath"; exit 2
-        }
-        $kimiArgs += @('--add-dir', (Resolve-Path -LiteralPath $RepoPath).Path)
-    }
 
     Push-Location $work
     try {
@@ -172,25 +178,28 @@ try {
         Pop-Location
     }
 
-    # --- Extract the final assistant message from the stream-json ------------
-    # Lines are JSON objects; the review is the last {"role":"assistant","content":...}
-    # with non-empty content (tool_calls lines carry no content).
-    $text = $null
+    # --- Extract the assistant messages from the stream-json ------------------
+    # ACCUMULATE, do not assign: stream-json emits one frame per assistant turn,
+    # and a late background-task notification frame with content would otherwise
+    # REPLACE the full review with a stub (observed live). Mirrors the deliberate
+    # append in claude-review.ps1. Tool-call frames carry no content.
+    $parts = @()
     foreach ($line in @($jsonl)) {
         $s = [string]$line
         if ($s -notmatch '"role"\s*:\s*"assistant"') { continue }
         try {
             $evt = $s | ConvertFrom-Json -ErrorAction Stop
-            if ($evt.content -and -not [string]::IsNullOrWhiteSpace([string]$evt.content)) { $text = [string]$evt.content }
+            if ($evt.content -and -not [string]::IsNullOrWhiteSpace([string]$evt.content)) { $parts += [string]$evt.content }
         } catch {}
     }
-    # Fallback: if stream-json parsing found nothing, treat raw output as the text.
-    if ([string]::IsNullOrWhiteSpace($text)) { $text = ($jsonl | Out-String) }
+    $text = ($parts -join "`n`n").Trim()
 
     # Strip any <think>...</think> reasoning blocks (K3 is always-thinking).
     $text = [regex]::Replace($text, '(?s)<think>.*?</think>', '').Trim()
     if ([string]::IsNullOrWhiteSpace($text)) {
-        Write-Error 'kimi returned an empty review.'; exit 1
+        # No parseable assistant frame: failing here is mandatory. Falling back to
+        # the raw stream would emit the JSONL protocol itself as the "review".
+        Write-Error 'kimi returned no parseable assistant review frame.'; exit 1
     }
 
     # --- Cost/tokens: stream-json carries no usage; report putative from 0 ---

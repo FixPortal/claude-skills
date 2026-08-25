@@ -1,8 +1,8 @@
 #requires -Version 7
 <#
 .SYNOPSIS
-  Rejects the two defects that have actually reached a persisted adversarial-review
-  deliverable.
+  Rejects the shape defects that have actually reached a persisted adversarial-review
+  deliverable, plus any Critical/High finding block with no **Verification** line.
 
 .DESCRIPTION
   `report.md` is assembled by the host agent, not by a script, so nothing checked its
@@ -100,6 +100,36 @@ if ($violations) {
     }
     Write-Host ''
     Write-Host "$(@($violations).Count) report-shape violation(s) across $($files.Count) deliverable(s)."
+    exit 1
+}
+
+# A Phase-4-covered finding (every Critical, every High, every contested) must carry a
+# **Verification** line, or a REFUTED verdict has no home and the tally keeps counting a
+# dead finding. Anchored on the house-style severity line (`**High** · [...]`) so tally
+# tables and prose mentions of a severity do not trip it.
+$unverified = foreach ($file in $files) {
+    $text = Get-Content -LiteralPath $file.FullName -Raw
+    if (-not $text) { continue }
+    $blocks = [regex]::Matches($text, '(?ms)^### .+?(?=^### |\z)')
+    foreach ($block in $blocks) {
+        if ($block.Value -match '(?m)^\*\*(Critical|High)\*\*\s*·' -and
+            $block.Value -notmatch '\*\*Verification\*\*') {
+            [pscustomobject]@{
+                File  = $file.FullName
+                Line  = ($text.Substring(0, $block.Index) -split "`n").Count
+                Title = (($block.Value -split "`n")[0]).Trim()
+            }
+        }
+    }
+}
+
+if ($unverified) {
+    foreach ($u in $unverified) {
+        Write-Host "$($u.File):$($u.Line): missing-verification - Critical/High finding block has no **Verification** line"
+        Write-Host "  $($u.Title)"
+    }
+    Write-Host ''
+    Write-Host "$(@($unverified).Count) unverified Critical/High finding(s) across $($files.Count) deliverable(s)."
     exit 1
 }
 

@@ -13,7 +13,9 @@ on:
 
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+  # Tag runs publish a release and must never be cancelled by a newer push; the group is
+  # already per-ref, so excluding them here costs nothing on branch or PR runs.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' && !startsWith(github.ref, 'refs/tags/') }}
 
 permissions:
   contents: read
@@ -27,6 +29,8 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+          # The pull_request changed-path filter below diffs against the base SHA.
+          fetch-depth: 0
 
       - name: Lint workflows
         uses: raven-actions/actionlint@3d39aea434753780c3b3d4a1a31c854b4dbf49d7 # v2
@@ -35,19 +39,90 @@ jobs:
 
       - name: Run skill verification scripts
         shell: pwsh
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
-          Get-ChildItem skills -Recurse -Filter 'verify-*.ps1' |
-            Where-Object Name -ne 'verify-collect.ps1' |
-            Sort-Object FullName |
-            ForEach-Object {
-              Write-Host "Running $($_.FullName)"
-              & $_.FullName
-            }
-          # Some negative-path verifiers intentionally run a failing child process and
-          # assert its exit code. Their assertions pass, but the native status persists.
-          $global:LASTEXITCODE = 0
+          $verifiers = @(
+            Get-ChildItem skills -Recurse -Filter 'verify-*.ps1' |
+              Where-Object Name -ne 'verify-collect.ps1' |
+              Sort-Object FullName
+          )
           # verify-collect.ps1 is an estate integration skeleton with intentional
           # <repos-root> placeholders; it cannot run in this standalone public repo.
+
+          # On a pull request, run only the verifiers of the skills the PR touched. Any
+          # change outside skills/ (.github, .claude, root files) can alter how every
+          # verifier runs, so it widens the run back to everything — as do push and
+          # dispatch events, and any failure to compute the diff.
+          if ($env:GITHUB_EVENT_NAME -eq 'pull_request' -and $env:BASE_SHA) {
+            $changed = @(& git diff --name-only "$env:BASE_SHA...HEAD")
+            if ($LASTEXITCODE -eq 0 -and $changed.Count -gt 0 -and
+                -not ($changed | Where-Object { $_ -notlike 'skills/*' })) {
+              $touched = @($changed | ForEach-Object { ($_ -split '/')[1] } | Sort-Object -Unique)
+              $selected = @($verifiers | Where-Object {
+                  $rel = $_.FullName.Substring($PWD.Path.Length + 1) -replace '\\', '/'
+                  $touched -contains ($rel -split '/')[1]
+                })
+              if ($selected.Count -gt 0) {
+                Write-Host "Changed-path filter: $($selected.Count) of $($verifiers.Count) verifiers, for skills: $($touched -join ', ')"
+                $verifiers = $selected
+              }
+              else {
+                Write-Host 'Changed-path filter selected nothing; running every verifier instead.'
+              }
+            }
+            else {
+              Write-Host 'Change set reaches outside skills/ (or is unreadable); running every verifier.'
+            }
+          }
+
+          $failed = @()
+          $skipped = 0
+          $passed = 0
+          foreach ($verifier in $verifiers) {
+            Write-Host "Running $($verifier.FullName)"
+            # Reset BEFORE each verifier: a negative-path verifier deliberately runs a
+            # failing child and asserts its exit code, and that native status must not
+            # leak into the next script's result. A nonzero code AFTER a verifier is
+            # therefore that verifier's own failure — verifiers that leave a deliberate
+            # child's code behind clear it themselves on their success path.
+            $global:LASTEXITCODE = 0
+            $threw = $null
+            $output = $null
+            try {
+              $output = & $verifier.FullName *>&1 | Out-String
+            }
+            catch {
+              $threw = $_
+            }
+            if ($output) { Write-Host $output }
+            # A skip is not a pass: `SKIP: <reason>` lines are counted so a verifier that
+            # verified nothing stays visible in the summary.
+            $skipped += ([regex]::Matches("$output", '(?m)^SKIP:')).Count
+            $exitCode = $global:LASTEXITCODE
+            if ($threw) {
+              $failed += "$($verifier.FullName) (threw: $threw)"
+            }
+            elseif ($null -ne $exitCode -and $exitCode -ne 0) {
+              $failed += "$($verifier.FullName) (exit code $exitCode)"
+            }
+            else {
+              $passed++
+            }
+          }
+
+          Write-Host "Verifier summary: $passed passed, $($failed.Count) failed, $skipped SKIP line(s), of $($verifiers.Count) run."
+          # The one assertion on skips, kept deliberately simple: a run in which every
+          # verifier skipped verified nothing, and nothing is not green.
+          if ($verifiers.Count -gt 0 -and $skipped -gt 0 -and $passed -eq 0 -and $failed.Count -eq 0) {
+            Write-Host 'Every verifier skipped — a run that verifies nothing is not a pass.'
+            exit 1
+          }
+          if ($failed) {
+            Write-Host 'Failed verifiers:'
+            $failed | ForEach-Object { Write-Host "  $_" }
+            exit 1
+          }
 
   gate-coverage:
     name: Gate coverage
@@ -65,6 +140,20 @@ jobs:
           GATE_EXEMPT: ''
         run: python3 .github/scripts/assert_gate_coverage.py .github/workflows/ci.yml
 
+  sanitisation:
+    name: No private tokens
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Assert tracked files carry no machine paths, org wiring, or real endpoints
+        run: python3 .github/scripts/assert_no_private_tokens.py
+
   # Required status check. Deliberately a pure aggregator of needs.*.result: it decides
   # what can merge, so it has no checkout, no parser and no network of its own.
   #
@@ -77,7 +166,7 @@ jobs:
   ci-gate:
     name: CI Gate
     if: always()
-    needs: [skills, gate-coverage]
+    needs: [skills, gate-coverage, sanitisation]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions: {}

@@ -8,7 +8,14 @@ $work = Join-Path $root 'work'
 
 try {
     New-Item -ItemType Directory -Path $fixture, $repo | Out-Null
+    # The spine refuses to start without a preflight.json in the WorkDir or its parent
+    # (the host's pre-flight record); the fixture satisfies the gate at the temp root,
+    # which is the parent of every work dir below.
+    [ordered]@{ stub = 'pass' } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $root 'preflight.json') -Encoding utf8
     Copy-Item -LiteralPath $source -Destination $fixture
+    # run-review.ps1 dot-sources pool-findings.ps1 (the shared finding splitter)
+    # from its own directory, so the fixture copy needs it beside the spine.
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot '..' 'pool-findings.ps1') -Destination $fixture
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot '..' 'briefs') -Destination $fixture -Recurse
 
     @'
@@ -127,3 +134,7 @@ finally {
         Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
+
+# The reused-WorkDir child above is asserted, not fatal — clear its native status so a
+# caller that checks $LASTEXITCODE after a PASS does not read the child's failure.
+$global:LASTEXITCODE = 0

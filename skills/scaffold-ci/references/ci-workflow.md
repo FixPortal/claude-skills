@@ -131,6 +131,9 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
+permissions:
+  contents: read
+
 jobs:
   backend:
     name: Backend (.NET)
@@ -138,6 +141,8 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - name: Lint workflows (actionlint)
         uses: raven-actions/actionlint@3d39aea434753780c3b3d4a1a31c854b4dbf49d7 # v2
         with:
@@ -173,6 +178,8 @@ jobs:
         working-directory: src/your-ui   # <- the UI subfolder, if not repo root
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - name: Lint workflows (actionlint)
         uses: raven-actions/actionlint@3d39aea434753780c3b3d4a1a31c854b4dbf49d7 # v2
         with:
@@ -209,6 +216,9 @@ on:
   schedule:
     - cron: '17 3 * * 2' # choose a distinct estate slot
 
+permissions:
+  contents: read
+
 jobs:
   extended-tests:
     name: Extended tests
@@ -216,6 +226,8 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - name: Lint workflows (actionlint)
         uses: raven-actions/actionlint@3d39aea434753780c3b3d4a1a31c854b4dbf49d7 # v2
         with:
@@ -337,14 +349,15 @@ skills root, which would resolve only under that runtime.
       - name: Assert every job in this workflow is gated
         env:
           # Jobs deliberately outside the gate, by job id. Push-only publish and deploy
-          # work belongs here; quality jobs never do.
-          GATE_EXEMPT: docker
+          # work belongs here; quality jobs never do. Every name must exist as a job in
+          # this workflow — the checker fails on a name that does not.
+          GATE_EXEMPT: ''
         run: python3 .github/scripts/assert_gate_coverage.py .github/workflows/ci.yml
 
   ci-gate:
     name: CI Gate
     if: always()
-    needs: [build, gate-coverage]   # the quality jobs in THIS file
+    needs: [backend, frontend, gate-coverage]   # the quality jobs in THIS file
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions: {}

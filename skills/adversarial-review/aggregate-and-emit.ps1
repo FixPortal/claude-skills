@@ -50,7 +50,10 @@
                    "costUsd": 2.7, "reviewDurationMs": 140000 }
       }
     Both keys optional. Missing `accepted` → zeros (warned). Missing `judge` → no
-    judge row emitted (the run shows as "no judge").
+    judge row emitted (the run shows as "no judge"). Judge `costUsd` is honoured
+    only for an exact, registry-unpriced model id; registry pricing always wins
+    for a resolvable or moving-alias model, and an alias the registry cannot
+    resolve stays UNKNOWN rather than trusting a stale caller-side figure.
 
 .EXAMPLE
     pwsh -NoProfile -File aggregate-and-emit.ps1 -RunRoot <runRoot> -Repo host-app -Summary 'WidgetService Final Audit'
@@ -276,7 +279,14 @@ foreach ($mf in $metricFiles) {
             }
         }
         $acc = $byReviewer[$key]
+        # Two participants can share a vendor key while running DIFFERENT models
+        # (Sonnet + Fable both roll up to one 'anthropic' row). Keeping whichever
+        # model appeared first silently misattributes the summed figures; join the
+        # distinct ids instead so the row says exactly what it sums.
         if (-not $acc.model -and $p.model) { $acc.model = $p.model }
+        elseif ($p.model -and $acc.model -cne $p.model) {
+            $acc.model = (@($acc.model -split '\+') + $p.model | Sort-Object -Unique) -join '+'
+        }
         $acc.inputTokens      += [long]($p.inputTokens      ?? 0)
         $acc.outputTokens     += [long]($p.outputTokens     ?? 0)
         $acc.costUsd          += [double]($p.costUsd         ?? 0)
@@ -352,18 +362,33 @@ if ($judge) {
     $judgeInput = [long]($judge.inputTokens ?? 0)
     $judgeOutput = [long]($judge.outputTokens ?? 0)
     $judgeModel = Resolve-ModelSelector ([string]$judge.reviewer) ([string]$judge.model)
-    $judgeCost = [double]($judge.costUsd ?? 0)
     $judgeCostEstimated = $true
-    # Registry pricing owns exact ids and resolved aliases alike. Incoming unknown is
-    # contagious; an absent registry price must not turn the transport zero into "free".
+    # Incoming unknown is contagious; an absent registry price must not turn the
+    # transport zero into "free".
     $judgeCostUnknown = [bool]($judge.costUnknown ?? $false)
     $resolvedCost = Get-RegistryCost $judgeModel $judgeInput $judgeOutput
-    if ($null -eq $resolvedCost) {
+    if ($null -ne $resolvedCost) {
+        # Registry pricing owns exact ids and resolved aliases alike: for a MOVING
+        # alias a caller-supplied costUsd was computed against whatever the alias
+        # resolved to at the time, so the fresh registry figure wins. The success
+        # branch must also CLEAR the unknown flag — it was previously seeded from
+        # the verdict and only ever set to $true, so a priced judge whose verdict
+        # said costUnknown stayed UNKNOWN forever.
+        $judgeCost = [double]$resolvedCost
+        $judgeCostUnknown = $false
+    }
+    elseif ($judge.model -notin @('opus', 'sonnet', 'haiku', 'fable') -and
+            $null -ne $judge.costUsd -and [double]$judge.costUsd -gt 0) {
+        # Honour a supplied costUsd for an EXACT model id the registry cannot price —
+        # the verdict file documents it as an input, and an exact id's cost is
+        # attributable to that model (unlike a moving alias, whose caller-side figure
+        # is untrusted precisely because we cannot resolve what it was priced against).
+        $judgeCost = [double]$judge.costUsd
+    }
+    else {
         Write-Warning "Judge model '$judgeModel' is absent or unpriced in $modelRegistryPath; recording cost as UNKNOWN, not zero."
         $judgeCost = 0.0
         $judgeCostUnknown = $true
-    } else {
-        $judgeCost = [double]$resolvedCost
     }
     $named = @{
         RunId = $RunId; Reviewer = $judge.reviewer; Role = 'judge'; Model = $judgeModel

@@ -91,8 +91,12 @@ if ([string]::IsNullOrWhiteSpace($Instruction)) {
 $sb = [System.Text.StringBuilder]::new()
 [void]$sb.AppendLine($Instruction)
 [void]$sb.AppendLine()
-[void]$sb.AppendLine('STYLE REQUIREMENT: Terse output only. No preamble, no summary, no closing remarks. Per finding: severity + location + one-sentence description + one-sentence fix. Skip any finding you cannot substantiate.')
-[void]$sb.AppendLine()
+if (-not $FindingsPath) {
+    # Phase-1 style directive only: in Phase 2 (-FindingsPath) the brief owns the
+    # verdict format, and an appended per-finding directive AFTER it conflicts.
+    [void]$sb.AppendLine('STYLE REQUIREMENT: Terse output only. No preamble, no summary, no closing remarks. Per finding: severity + location + one-sentence description + one-sentence fix. Skip any finding you cannot substantiate.')
+    [void]$sb.AppendLine()
+}
 [void]$sb.AppendLine('--- DIFF UNDER REVIEW ---')
 [void]$sb.AppendLine((Read-InputFile $DiffPath 'Diff file'))
 

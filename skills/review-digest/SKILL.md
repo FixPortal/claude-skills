@@ -27,7 +27,7 @@ runs a review and never branches or commits to the scanned repos.
 4. **Rank** — forward-looking risk score per repo (what is UNREVIEWED now).
 5. **Delta** — diff against the most recent prior report in the Review Ledger folder.
 6. **Write** — the dated digest report; **write back** themes.json.
-7. **Hand-off** — write the sibling `<today>-handoff.md` scope brief for another agent.
+7. **Hand-off** — write the sibling `<timestamp>-handoff.md` scope brief for another agent.
 
 ## 1. Collect
 
@@ -43,8 +43,9 @@ fixerModel }`, lastReviewDate, batchMarkers
 `vault` (exists, reviewers = panel models, judge, date, reviewType, tally = found
 C/H/M/L, `reviewTarget` / `reviewScope` = the report's `target:` / `scope:` fields, `isDocumentReview` = true when that
 target is a document not a code tree), `hasGraphify` (a `graphify-out/` dir is present in the
-repo), `hasTrackedSource` (the repo tracks at least one source file — false for a docs/spec/CV
-repo), and `outsideScanPath`.
+repo), `hasTrackedSource` (tri-state: true/false for a verified probe — false means a docs/spec/CV
+repo — and **null when the `git ls-files` probe itself failed**: that is UNKNOWN, never a
+verified "no source"), and `outsideScanPath`.
 
 **`isDocumentReview` — a document review is NOT code coverage.** When true (e.g. `resumes-cv`,
 `target: your-cv.html` — a reviewed CV), the review confers zero coverage on any
@@ -64,6 +65,9 @@ floated four such repos above genuinely-unreviewed code across three prior diges
 sha, tested with `git cat-file -e` against every in-path and `-RepoRoots` repo — the falsifiable
 check that survives a prefix rename; (3) a normalised name search, exact then **suffix then
 substring** (so `quickfixn` finds `quickfix-n` AND `budget-tracker` finds `personal-budget-tracker`).
+Stages 2 and 3 resolve only on a **unique** candidate — a sha living in a fork/mirror/worktree, or
+a name matching more than one repo, is warned about and left `unresolved` rather than silently
+credited to whichever candidate enumerated first.
 A vault folder that resolves to a repo **already scanned in-path** is a stale pre-rename duplicate
 and is dropped (its own newer in-path row already covers it). Resulting fields:
 - `resolvedPath` — the git repo whose tree the review actually covered. The git side
@@ -85,8 +89,10 @@ and the hand-off report:
   `<base>..<tip>` in vault `target:` / `scope:` evidence; preferred), `vault-date` (last commit
   on/before the vault adversarial-review date),
   `vault-predates-history` (the vault review is older than the repo's earliest commit,
-  e.g. an OSS re-init squash — boundary anchored at the root commit, so the WHOLE current
-  tree is adversarially unreviewed; flag it as a full-repo sweep), `git-marker` (no vault
+  e.g. an OSS re-init squash — the boundary is CLEARED and the repo is treated as
+  never reviewed with full-history scope, because anchoring at the root commit would omit
+  everything the squash introduced and report the tree as reviewed; flag it as a full-repo
+  sweep), `git-marker` (no vault
   report — found a reachable review/remediation subject), `none` (never reviewed),
   `scoped-query-failed` / `scoped-no-history-before-review` (a subsystem could not establish a
   date boundary), or `unresolved-vault-folder` (a vault folder that could not be placed on disk
@@ -105,8 +111,9 @@ and the hand-off report:
   `100 + commits`, floating an unknown to the top of the rank. Unresolved rows are excluded
   from ranking entirely instead.
 - `effectiveNeverReviewed` — the collector's final eligibility decision. It is true for
-  `neverReviewed` and for a `git-marker` without strict numbered review or adversarial-audit batch/run/trailer evidence; in
-  the latter case the false marker boundary is cleared and full history is the scope. Consumers
+  `neverReviewed`, for `vault-predates-history`, and for a `git-marker` without strict numbered
+  review or adversarial-audit batch/run/trailer evidence; in the latter cases the false
+  boundary is cleared and full history is the scope. Consumers
   must use this field rather than reproducing boundary inference.
 - `sinceReview` — commits **since the last review** (`boundarySha..HEAD`), each
   `{ sha, date, subject }`. Empty for a never-reviewed repo (history is not
@@ -154,6 +161,7 @@ effectiveNeverReviewed = git.effectiveNeverReviewed
 
 score =
   !eligible ? VOID
+  : (hasTrackedSource -eq null) ? UNKNOWN                         # probe failed — never score, never void
   : (effectiveNeverReviewed && !hasTrackedSource) ? VOID          # no code to review — not a priority
   : effectiveNeverReviewed ? (100 + sinceReviewCount)             # never reviewed floats to the top
   : sinceReviewCount * (1 + daysSinceReview / 30)                 # unreviewed work, aged by staleness
@@ -164,7 +172,10 @@ score =
 (`git ls-files` for source extensions is empty — docs/spec/playbook/CV repos) is **not
 code-reviewable**: void its score, list it separately as "not code-reviewable (0 tracked source)",
 and never let the `100 + commits` floor rank it. Missing this floated `engineering-system`, `qa`,
-`initiator` and `personal-resumes` into the top-10 across three prior digests. A `git-marker`
+`initiator` and `personal-resumes` into the top-10 across three prior digests. **`hasTrackedSource`
+= null is a third state — the probe failed, so the truth is UNKNOWN**: do not void it as
+not-code-reviewable and do not score it; surface it as unknown (the review-sweep runbook STOPs on
+this row). A `git-marker`
 without strict numbered review or adversarial-audit batch/run/trailer evidence is already emitted as
 `git.effectiveNeverReviewed` — use that value.
 
@@ -177,15 +188,20 @@ deferred-count, never-reviewed flag) so the rank is auditable, not a black box.
 
 ## 5. Delta
 
-Look in `<vault>\Claude\Review Ledger\` for the newest prior
-`YYYY-MM-DD.md`. If one exists, compute what changed since: new batches, new
+Look in `<vault>\Claude\Review Ledger\` for the newest prior digest
+(`*.md`, excluding `*-handoff.md`). If one exists, compute what changed since: new batches, new
 themes, newly-closed deferred items, newly-reviewed repos, new gaps. First run ->
 omit the delta header.
 
 ## 6. Write the report
 
-Write `<vault>\Claude\Review Ledger\<today>.md` (today =
-`Get-Date -Format yyyy-MM-dd`). Sections, in order:
+Name the output with the current UTC timestamp:
+`<vault>\Claude\Review Ledger\<YYYY-MM-DDTHH-mm-ss.fffffffZ>.md`
+(`Get-Date -Format` with that pattern, from `[DateTime]::UtcNow`). A bare date
+(`yyyy-MM-dd`) collides on a same-day re-run and silently overwrites the first
+run's report. Create the exact path with `New-Item -ItemType File -ErrorAction Stop`
+before writing; if it already exists, use a newly captured UTC timestamp.
+Never overwrite or force-write an older run's file. Sections, in order:
 
 1. **Since <last date>** (omit on first run).
 2. **Review-priority** — repos ranked worst-first by the §4 risk score, with the
@@ -203,7 +219,10 @@ Then write the merged `seen` values and any new themes back to that same
 
 ## 7. Hand-off scope report
 
-Write a **sibling** file `<vault>\Claude\Review Ledger\<today>-handoff.md`.
+Write a **sibling** file `<vault>\Claude\Review Ledger\<timestamp>-handoff.md`,
+where `<timestamp>` is the SAME UTC timestamp used for the §6 digest file (so a
+digest and its hand-off pair off by name, and a same-day re-run can never
+overwrite an earlier pair).
 This is the file you (or the user) hand to **another agent** that holds the
 `adversarial-review` skill — it tells that agent exactly what to review and over
 what scope, so it spends its tokens reviewing, not rediscovering scope.
@@ -253,7 +272,8 @@ come back null. Render these honestly:
 - READ-ONLY on the scanned repos — never branch, commit, or edit their code.
 - NEVER auto-edit CLAUDE.md or scaffolds. The prevention candidates are a proposal you action by hand.
 - The ONLY file this skill mutates as state is its own `themes.json`. The two
-  vault files (`<today>.md` digest, `<today>-handoff.md` scope brief) are outputs.
+  vault files (`<timestamp>.md` digest, `<timestamp>-handoff.md` scope brief) are outputs,
+  created fresh per run with the §6 never-overwrite rule.
 - The hand-off report is **propose-only**: it tells another agent what to review;
   it never runs `adversarial-review` itself.
 - Do NOT run a review — if the user wants one, that's `adversarial-review` /

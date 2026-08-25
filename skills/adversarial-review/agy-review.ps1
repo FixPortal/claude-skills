@@ -99,7 +99,11 @@ try {
         'Output only the review text in the exact format the brief requests. No preamble or narration.'
     ) | Where-Object { $_ }
 
-    $agyEffort = ($Model -match '-(low|medium|high)$') ? $Matches[1] : (($Effort -in @('low', 'medium')) ? $Effort : 'high')
+    # agy accepts only low|medium|high. A model-name suffix wins when present;
+    # otherwise -Effort applies, with the panel-contract values xhigh/max folded
+    # down to high (the deepest agy supports) rather than rejected, so the uniform
+    # five-value -Effort contract shared with claude-review.ps1 still binds.
+    $agyEffort = ($Model -match '-(low|medium|high)$') ? $Matches[1] : (($Effort -in @('xhigh', 'max')) ? 'high' : $Effort)
     $agyArgs = @(
         '-p', ($prompt -join "`n")
         '--model', $Model

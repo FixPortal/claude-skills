@@ -28,7 +28,13 @@ $work = Join-Path $root 'work'
 
 try {
     New-Item -ItemType Directory -Path $fixture, $repo | Out-Null
+    # The spine refuses to start without a preflight.json in the WorkDir or its parent
+    # (the host's pre-flight record); the fixture satisfies the gate at the temp root.
+    [ordered]@{ stub = 'pass' } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $root 'preflight.json') -Encoding utf8
     Copy-Item -LiteralPath $source -Destination $fixture
+    # run-review.ps1 dot-sources pool-findings.ps1 (the shared finding splitter)
+    # from its own directory, so the fixture copy needs it beside the spine.
+    Copy-Item -LiteralPath (Join-Path $skillRoot 'pool-findings.ps1') -Destination $fixture
     Copy-Item -LiteralPath (Join-Path $skillRoot 'briefs') -Destination $fixture -Recurse
 
     # Reviewer C answers with prose only -- no '### ', no line-initial 'F<n>:' -- but

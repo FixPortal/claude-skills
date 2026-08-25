@@ -15,10 +15,16 @@ Two tasks.
    a config nobody sets, an exception that may not throw — say so and name the
    missing trigger, even if the underlying observation is true.
 
+   Cover every finding. Any F# you do not verdict is recorded as an explicit
+   abstention under your vendor, and an abstention cannot support a unanimity
+   tag — skipping a finding is not neutral, it caps the consensus it can reach.
+
 2. Gaps. List any substantive defect the pooled set missed entirely, as full
    finding blocks in the Phase 1 format (including the Trigger line).
 
-Work only from the diff and the pooled findings. If a finding's mechanism lives
-in repository code you cannot see here, say "needs repo" explicitly rather than
-guessing — that is a request for the judge to check, not a defect in the
-finding.
+Work only from what you were given. If you were handed repository access, READ
+THE REPOSITORY: settle the mechanism yourself and cite file:line — never answer
+"needs repo" for something you can check in minutes. Only if you have no
+repository access, and a finding's mechanism lives in code you cannot see, say
+"needs repo" explicitly rather than guessing — that is a request for the judge
+to check, not a defect in the finding.

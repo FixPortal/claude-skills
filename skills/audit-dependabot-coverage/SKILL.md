@@ -46,8 +46,9 @@ it. That matters more since the paid scanning products went off org-wide on
   exists to surface. A too-strict one costs a human five seconds.
 - **Never self-triage.** Every row goes to a human. Do not dismiss by severity, age,
   scope or rule family.
-- **Repository list is derived live** from `gh repo list`, never hard-coded — a repo
-  added later would otherwise be silently uncovered.
+- **Repository list is derived live** from the organisation repos API, fully
+  paginated, never hard-coded — a repo added later would otherwise be silently
+  uncovered.
 
 ## How matching works
 
@@ -64,9 +65,16 @@ The verb anchor is load-bearing. Dependabot embeds release notes and changelogs 
 name dozens of unrelated packages; an unanchored substring match would read those as
 fixes and mark real alerts covered.
 
+A package-name match is then narrowed by **directory and ecosystem**. In a monorepo a
+PR bumping a package in `/web` says nothing about the same package's alert in `/api`.
+The alert's target comes from `dependency.manifest_path`; the PR's from its branch
+(`dependabot/<ecosystem>/<directory>/<update>`). When the PR's target cannot be
+established the alert stays unmatched — unresolvable is not covered.
+
 ## Reading the output
 
-Each row is an open alert with no open Dependabot PR naming that package. Dependabot
+Each row is an open alert with no open Dependabot PR naming that package in that
+directory and ecosystem. Dependabot
 may have decided no fix exists — or decided that **wrongly**. Those are
 indistinguishable from outside, which is why a human reads the row.
 
@@ -90,7 +98,7 @@ resolves it, whatever the log claims.
 | `-Org` | Organisation(s) to enumerate. Default `<your-org>`. |
 | `-Repo` | Explicit `owner/repo`, repeatable; skips enumeration. |
 | `-GraceHours` | Age below which an alert is not reported. Default 48 — one weekly window plus queue time. |
-| `-AlertState` | `open` (default), or `fixed`/`dismissed` to backtest against history. |
+| `-AlertState` | `open` (default), or `fixed`/`dismissed`/`auto_dismissed` to backtest against history. |
 | `-Json` | Machine-readable output for a scheduled run. |
 
 `-AlertState fixed` is how the emit path was validated against the real nanoid alert.

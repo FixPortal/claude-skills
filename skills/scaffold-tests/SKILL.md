@@ -12,7 +12,6 @@ Create .NET test projects that mirror `src/`, preserve the repository's framewor
 - Put new projects in `tests/{ProjectName}.Tests`; preserve established names such as `.UnitTests`.
 - Use `Microsoft.NET.Sdk`, the matching `ProjectReference`, and the solution's `tests` folder.
 - With central package management, put concrete `PackageVersion` entries in `Directory.Packages.props` and versionless `PackageReference` entries in the test project.
-- Restore, build, and run the repository's real test command before declaring success.
 
 ## Framework decision
 
@@ -24,7 +23,7 @@ Before adding a test project, inspect test `.csproj` files and `Directory.Packag
 | xUnit v3 | Keep xUnit v3 and its established runner/package layout. |
 | NUnit | Keep NUnit and its established runner/package layout. |
 
-If there is no existing test framework, it is a new solution: use xUnit v3. Required packages for a new xUnit v3 project are `xunit.v3`, `xunit.runner.visualstudio`, `Microsoft.NET.Test.Sdk`, `NSubstitute`, and `AwesomeAssertions`, at versions compatible with the target framework. These `xunit.v3` package and layout instructions apply only to a new project with no existing test framework. New xUnit v3 projects set `<OutputType>Exe</OutputType>`; retain `Microsoft.NET.Test.Sdk` and `xunit.runner.visualstudio`, and do not set `UseMicrosoftTestingPlatformRunner` merely for Stryker.
+If there is no existing test framework it is a new solution: use xUnit v3, with packages `xunit.v3`, `xunit.runner.visualstudio`, `Microsoft.NET.Test.Sdk`, `NSubstitute`, and `AwesomeAssertions` at target-compatible versions. These `xunit.v3` package and layout instructions apply only to a new project with no existing test framework. New xUnit v3 projects set `<OutputType>Exe</OutputType>`; retain `Microsoft.NET.Test.Sdk` and `xunit.runner.visualstudio`, and do not set `UseMicrosoftTestingPlatformRunner` merely for Stryker.
 
 For an existing suite, keep its framework and runner; add `NSubstitute` and `AwesomeAssertions` if absent at target-compatible versions, without upgrading or converting either.
 
@@ -34,9 +33,9 @@ Never convert an existing suite while scaffolding.
 
 - Name classes `{ClassName}Tests` and methods `Method_Scenario_ExpectedResult`.
 - In xUnit, prefer `[Theory]`/`[InlineData]`; in NUnit use `[Test]` for one case and `[TestCase]` for inputs.
-- Give each new test method an XML summary explaining what it validates and why the behaviour matters. Do not retrofit comments across an existing suite.
+- Give each new test method an XML summary explaining what it validates and why; do not retrofit comments across an existing suite.
 - Test behaviour, not trivial getters or implementation details.
-- Use `using AwesomeAssertions;` and `.Should()` for every assertion. Never add `FluentAssertions` or use xUnit `Assert.*`.
+- Assert with `using AwesomeAssertions;` and `.Should()`; never add `FluentAssertions` or use xUnit `Assert.*`.
 - Use NSubstitute only for interceptable, app-owned dependencies in unit tests. Integration tests use real collaborators except at genuine external boundaries.
 - Inject NodaTime `IClock`, or `TimeProvider` where NodaTime is not in play; never read static "now" in tested code.
 
@@ -73,7 +72,7 @@ public sealed class FruitLookup
 
 public sealed class FruitLookupTests
 {
-    /// <summary>Returns the cached fruit so callers preserve the app's cache contract.</summary>
+    /// <summary>Returns the cached fruit so callers preserve the cache contract.</summary>
     [Fact]
     public async Task FindAsync_WhenFruitExists_ReturnsCachedFruit()
     {
@@ -89,27 +88,31 @@ public sealed class FruitLookupTests
 }
 ```
 
-Do not substitute a concrete library merely to configure its extension methods: NSubstitute can only intercept virtual/interface calls. Wrap the external boundary in an existing app-owned interface when one exists; do not invent a wrapper unless production code genuinely needs that seam.
+Do not substitute a concrete library merely to configure its extension methods: NSubstitute can only intercept virtual/interface calls. Wrap the external boundary in an existing app-owned interface; do not invent a wrapper unless production code genuinely needs that seam.
 
 ## Async and timing
 
 Read [references/async-and-timing.md](references/async-and-timing.md) before writing async, concurrent, transport, or shutdown tests. The enforceable rules are:
 
-- Await a real signal or poll the real condition; never sleep and then assert.
 - Every operation that can miss completion gets one generous diagnostic hang ceiling.
 - Use xUnit `[Fact(Timeout = ...)]` only after inspecting `xunit.runner.json` and confirming conservative scheduling or that parallelization is disabled. Aggressive or unknown scheduling requires an operation-local `WaitAsync(TimeSpan)` or a token backed by `CancelAfter` instead.
-- A ceiling answers "did completion go missing?" It must not be a tight performance assertion.
-- Gate negative assertions on a later positive signal whenever possible; absence after an arbitrary delay proves nothing.
-- A duration passed into production code is configuration, not automatically a test timer.
+- A ceiling answers "did completion go missing?"; it is not a performance assertion.
+- Gate negative assertions on a later positive signal; absence after an arbitrary delay proves nothing.
+- A duration passed into production code is configuration, not a test timer.
 
 ## CI eligibility
 
-Read [references/ci-test-budgets.md](references/ci-test-budgets.md) whenever tests or test projects will run in CI. PR eligibility is a cost contract: one test gets 30 seconds, one substantive required job gets 10 minutes, and substantive PR work targets 15 aggregate runner-minutes. End-to-end, stress/load/soak, repeated concurrency, slow packaging, and compatibility matrices run weekly/manual in a structurally separate lane with a 45-minute job ceiling.
+Read [references/ci-test-budgets.md](references/ci-test-budgets.md) whenever tests or test projects will run in CI. PR eligibility is a cost contract with per-test, per-job, and aggregate ceilings; end-to-end, stress/load/soak, repeated concurrency, slow packaging, and compatibility matrices run weekly/manual in a structurally separate lane.
 
-When the runner contract permits a framework ceiling, keep cancellation attribution precise and fail through AwesomeAssertions:
+When the runner contract permits a framework ceiling, keep cancellation attribution precise and fail through AwesomeAssertions. `sender`/`sink` are the test's system-under-test handles:
 
 ```csharp
 private const int HangCeilingMs = 30_000;
+
+// Runs a blocking teardown off the thread-pool so a blocked send cannot starve it.
+private static Task RunOnDedicatedThread(Action action) =>
+    Task.Factory.StartNew(action, CancellationToken.None,
+        TaskCreationOptions.LongRunning, TaskScheduler.Default);
 
 [Fact(Timeout = HangCeilingMs)]
 public async Task Shutdown_WhenSendIsBlocked_ReturnsWithoutCompletingSend()
@@ -127,6 +130,14 @@ public async Task Shutdown_WhenSendIsBlocked_ReturnsWithoutCompletingSend()
         false.Should().BeTrue("the test's diagnostic hang ceiling expired");
     }
 }
+```
+
+This form is **xUnit v3 only** — `TestContext.Current` and `[Fact(Timeout = ...)]` do not exist in v2. On a kept xUnit v2 suite, back the ceiling with a token source:
+
+```csharp
+using var ceiling = new CancellationTokenSource();
+ceiling.CancelAfter(HangCeilingMs);
+// Pass ceiling.Token to WaitAsync; the catch filters on ceiling.IsCancellationRequested.
 ```
 
 ## Common mistakes

@@ -34,7 +34,7 @@ if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($rootRaw)) { throw 'rec
 $repoRoot = [IO.Path]::GetFullPath($rootRaw.Trim())
 ```
 
-Resolve the shared recipe with `$recipePath = (Resolve-Path (Join-Path $PSScriptRoot '..\close\references\topic-key.ps1')).Path`, and dot-source it with `. $recipePath`. It provides `Get-RepositoryTopicInfo` and `Get-RemoteRepositoryName`; call each once, in the block below.
+Resolve the shared recipe with `$recipePath = (Resolve-Path (Join-Path $PSScriptRoot '..' 'close' 'references' 'topic-key.ps1')).Path`, and dot-source it with `. $recipePath`. It provides `Get-RepositoryTopicInfo` and `Get-RemoteRepositoryName`; call each once, in the block below.
 Assign `$repoDisplayName = $topicInfo.DisplayName`,
 `$repoTopicKey = $topicInfo.TopicKey`,
 `$contextTopic = $topicInfo.ContextTopic`, and
@@ -75,9 +75,11 @@ $memoryBodies = & "$PSScriptRoot\references\recall-icm-topics.ps1" -Topics $topi
 
 It calls `icm.exe list --topic "$topic" --all --format json`, not the
 five-result-default `recall` command. Each list result is a complete stored
-memory record. If either exact topic cannot be enumerated or parsed, use no
-ICM candidate context for that failed topic and record the incomplete recall
-in journal detail; never treat a partial result as complete.
+memory record. The helper returns one result per topic; a topic whose
+enumeration or parse fails arrives with empty `Bodies`, `Failed = $true`, and a
+warning, and the recall continues with the remaining topics. Use no ICM
+candidate context for that failed topic and record the incomplete recall in
+journal detail; never treat a partial result as complete.
 
 Keep the results as candidate context; prior recap digests are never evidence
 for forward work.

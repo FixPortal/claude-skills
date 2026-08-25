@@ -36,7 +36,9 @@ giant diff. Exclude generated/migration/build outputs where appropriate.
    declared `fallbackWrapper` identically and disclose metered/degraded use.
    **Host step — `run-review.ps1` does not parse those headers**; skipping it moves
    auth failures into a paid parallel round. A wrapper declaring no
-   `PREFLIGHT_COMMAND:` is unverified, not passing.
+   `PREFLIGHT_COMMAND:` is unverified, not passing. Record each wrapper's
+   pre-flight result into `preflight.json` in the run root: the driver refuses to
+   start without it, so "pre-flight ran" is evidence, not recollection.
 3. Stop if available vendors fall below `minVendors`.
 4. For a dirty target, include the working-tree diff deliberately or stop;
    never imply uncommitted work was reviewed when it was invisible. This is
@@ -77,9 +79,11 @@ driver's judge packet. Measure consensus by vendor, not reviewer headcount.
 Preserve contested findings, correct factually refuted mechanisms, and inspect
 the repository when a repo-blind limitation leaves a mechanism unsettled.
 
-### 3.5. Optional judge audit
+### 3.5. Judge audit
 
-Only when requested or required by the run's risk policy, select from
+Mandatory when the review gates a merge or the target is HIGH-tier under the
+repo's review policy — the same tier signal the review-policy gate uses;
+otherwise optional on request. Select from
 `roles.judgeAudit.pool` and pass `briefs/phase3.5-judge-audit.txt` verbatim.
 This checks the adjudicator for dropped/misrated findings; it does not replace
 verification.
@@ -87,22 +91,33 @@ verification.
 **Fold every `Correction:` into `report.md` before Phase 4 and record what was
 folded.** Phase 4 verifies findings *in the report*, so an unfolded `DROPPED`
 finding is invisible to it and the audit produces no engineering outcome. A
-finding restored or promoted to High by a correction enters Phase 4 like any other.
+`DROPPED` correction carries a complete house-style finding block and folds
+unconditionally. A demotion correction (an uncontested High taken below High)
+is different: demotion removes the finding from Phase-4 scope, so the
+correction is never tested — route it back to the judge for reconsideration
+rather than applying it directly, and keep the finding's original verification
+scope until corrections resolve. A finding restored or promoted to High enters
+Phase 4 like any other.
 
 ### 4. Verify
 
-Every High and every contested finding is verified against live code by a fresh
+Every Critical, every High and every contested finding is verified against live code by a fresh
 worker selected from `roles.verifier.pool`, rotating vendors. Prefer a vendor
 other than the one that raised the finding; `briefs/phase4-verify.txt` requires
 the verifier to reach its own verdict regardless, so a same-vendor check is a
 weaker result, not an invalid one — say which it was. Use that brief verbatim.
 Record `CONFIRMED`, `REFUTED`, or `INDETERMINATE` with file/line evidence. Never
-publish a High solely because a blind reviewer sounded confident.
+publish a High solely because a blind reviewer sounded confident. `REFUTED`
+moves the finding out of the `_index.md` severity tally — record it in
+`report.md` with its evidence, never counted as open.
 
 **Honour each pool member's own `repoAccess`** — declared per member, not per role.
 A member whose wrapper has no per-invocation read-only mode is `false`: give it the
 diff and context files, or a **detached-commit `git worktree`**, never `-RepoPath` on
-the live tree. Otherwise a verifier can write to the tree it is verifying.
+the live tree. Otherwise a verifier can write to the tree it is verifying. The
+worktree protects the live checkout, not the evidence's provenance: the verdict
+must record the worktree's commit (`git rev-parse HEAD`) and a clean
+`git status --porcelain` at run end, per the brief.
 
 ### 5. Synthesize and persist
 
@@ -142,8 +157,11 @@ transport cost with `costUnknown=true`, rendered as `UNKNOWN`, rather than a
 stale estimate or a displayed zero.
 
 `IssuesAccepted` credits only a vendor's own Phase-1 findings that survive
-adjudication and verification. Derive provenance from the pooled map, never
-from consensus tags; accepted cannot exceed raised. Subscription-backed calls
+adjudication and verification. The driver writes `pooled-map.json`
+(F# → `{id, vendor}`) into the run root; adjudicated findings must carry their
+pooled F-id provenance so acceptance is derivable from that map — never
+hand-reconstructed, and never derived from consensus tags. Accepted cannot
+exceed raised. Subscription-backed calls
 have zero marginal API spend, while a declared API fallback is metered and must
 be disclosed.
 

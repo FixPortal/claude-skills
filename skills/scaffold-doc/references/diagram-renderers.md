@@ -21,7 +21,7 @@ A repo-committed Markdown document can be either. A README whose one diagram is 
 > edits improve the Mermaid version too, so the exercise is worth running even when the answer is
 > row one.
 
-Invoke `diagram-design` through the Skill tool. **Never hand-author branded SVG inside `scaffold-doc`** — that skill owns the skin, the focal rule, the connector grammar and three checkers this one does not have.
+Invoke `diagram-design` through the Skill tool. **Never hand-author branded SVG inside `scaffold-doc`** — that skill owns the skin, the focal rule, the connector grammar and three checkers this one does not have. If `diagram-design` is not installed in the environment you are running in, fall back to Mermaid and note the substitution in the document — the routing table above still applies.
 
 ## Mixing them in one document
 
@@ -58,7 +58,9 @@ Do not convert a whole document. The cost is per-figure and so is the benefit.
 > line-break glyph cp1252 cannot represent. Set the encoding in the same call, using the syntax of
 > the shell you are actually in:
 >
-> - PowerShell — `$env:PYTHONIOENCODING='utf-8'; python <script> <file>`
+> - PowerShell — `$prev = $env:PYTHONIOENCODING; try { $env:PYTHONIOENCODING='utf-8'; python <script> <file> } finally { $env:PYTHONIOENCODING = $prev }`
+>   (a bare `$env:PYTHONIOENCODING='utf-8'; python ...` mutates the caller's session;
+>   the `try`/`finally` scopes it to the one call)
 > - cmd.exe — `set PYTHONIOENCODING=utf-8 && python <script> <file>`
 > - bash — `PYTHONIOENCODING=utf-8 python <script> <file>`
 >

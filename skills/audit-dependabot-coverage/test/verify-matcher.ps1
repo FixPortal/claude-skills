@@ -24,13 +24,23 @@ $ErrorActionPreference = 'Stop'
 $script:reconcile = Join-Path (Split-Path -Parent $PSScriptRoot) 'reconcile.ps1'
 if (-not (Test-Path $script:reconcile)) { throw "reconcile.ps1 not found at $script:reconcile" }
 
-$src = Get-Content $script:reconcile -Raw
-foreach ($fn in @('Test-DependabotPrCoversPackage', 'ConvertFrom-PrListJson', 'Get-Prop')) {
-    $m = [regex]::Match($src, "(?ms)^function $fn \{.*?\r?\n\}")
-    if (-not $m.Success) {
+$src = $script:reconcile
+# Extract each function via the AST, not a regex window. A non-greedy regex stopping
+# at the first line-initial '}' only works while every internal brace happens to be
+# indented: a here-string, a nested scriptblock or a reformat truncates the extraction,
+# and `if (-not $m.Success)` catches only total non-match -- so the truncated body would
+# dot-source as a DIFFERENT function than the one that ships. A guard whose scope
+# depends on formatting is not a guard. Same fix as verify-pruned-traversal.ps1.
+$parseErrors = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseFile($src, [ref]$null, [ref]$parseErrors)
+if ($parseErrors) { throw "reconcile.ps1 does not parse: $($parseErrors[0].Message)" }
+foreach ($fn in @('Test-DependabotPrCoversPackage', 'ConvertFrom-PrListJson', 'Get-Prop',
+                  'Get-AlertTarget', 'Test-DependabotPrTargetsAlert')) {
+    $def = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $fn }, $true)
+    if (-not $def) {
         throw "Could not extract $fn from reconcile.ps1 - was it renamed?"
     }
-    . ([scriptblock]::Create($m.Value))
+    . ([scriptblock]::Create($def.Extent.Text))
 }
 
 $fail = 0
@@ -202,6 +212,40 @@ $implicit = Get-Prop $alertLike @('nope')
 if ($null -eq $implicit) { ok 'a missing property with no Default yields $null' }
 else { bad "a missing property with no Default yields `$null (got '$implicit')" }
 
+# --- directory + ecosystem agreement -------------------------------------------
+# A package-name body match is not coverage in a monorepo: a PR bumping a package in
+# /web must not mark the same package's /api alert covered. The PR's target comes
+# from its branch (dependabot/<ecosystem>/<directory...>/<update>); when it cannot
+# be established, the alert stays unmatched -- unresolvable is not covered.
+$alertWeb = Get-AlertTarget -Alert ('{"dependency":{"manifest_path":"web/package-lock.json","package":{"ecosystem":"npm"}}}' | ConvertFrom-Json)
+$alertApi = Get-AlertTarget -Alert ('{"dependency":{"manifest_path":"api/package-lock.json","package":{"ecosystem":"npm"}}}' | ConvertFrom-Json)
+$prWeb   = '{"head":{"ref":"dependabot/npm_and_yarn/web/npm-minor-and-patch-eff5aeb2ab"}}' | ConvertFrom-Json
+$prRoot  = '{"head":{"ref":"dependabot/npm_and_yarn/brace-expansion-5.0.9"}}' | ConvertFrom-Json
+$prNuget = '{"head":{"ref":"dependabot/nuget/web/Scalar.AspNetCore-2.16.18"}}' | ConvertFrom-Json
+$prOdd   = '{"head":{"ref":"feature/no-dependabot-shape"}}' | ConvertFrom-Json
+
+function Assert-Target {
+    param($Pr, $Target, [bool]$Expected, [string]$Label)
+    $got = Test-DependabotPrTargetsAlert -Pr $Pr -AlertTarget $Target
+    if ($got -eq $Expected) { ok $Label } else { bad "$Label (want $Expected, got $got)" }
+}
+
+Assert-Target -Pr $prWeb -Target $alertWeb -Expected $true `
+    -Label 'a PR targets the directory and ecosystem its branch names'
+Assert-Target -Pr $prWeb -Target $alertApi -Expected $false `
+    -Label 'a /web PR does NOT cover the same package alert in /api'
+Assert-Target -Pr $prRoot -Target (Get-AlertTarget -Alert ('{"dependency":{"manifest_path":"package-lock.json","package":{"ecosystem":"npm"}}}' | ConvertFrom-Json)) -Expected $true `
+    -Label 'a root single-dep branch targets the root manifest'
+Assert-Target -Pr $prNuget -Target $alertWeb -Expected $false `
+    -Label 'an npm alert is not covered by a nuget PR in the same directory'
+Assert-Target -Pr $prOdd -Target $alertWeb -Expected $false `
+    -Label 'a non-Dependabot branch shape is unresolvable, not covered'
+if ($null -eq (Get-AlertTarget -Alert ('{"dependency":{"package":{"ecosystem":"npm"}}}' | ConvertFrom-Json))) {
+    ok 'an alert without a manifest path has no establishable target'
+} else {
+    bad 'an alert without a manifest path has no establishable target'
+}
+
 # --- red check --------------------------------------------------------------
 # A suite that cannot fail is not a suite. This asserts a deliberately false
 # expectation is reported as a failure, then repairs the counter.
@@ -212,4 +256,11 @@ if ($script:fail -eq 1) { $script:fail = $before; ok 'red check: a false expecta
 else { $script:fail = 1; bad 'red check: a false expectation is reported as a failure' }
 
 ''
-if ($script:fail -eq 0) { 'PASS'; exit 0 } else { 'FAILURES ABOVE'; exit 1 }
+if ($script:fail -eq 0) {
+    # The suite's deliberately-failing probes (and the gh/git calls of dot-sourced
+    # helpers) can leave a nonzero LASTEXITCODE behind; ci.yml's shared loop would
+    # otherwise read this PASS as a failure.
+    $global:LASTEXITCODE = 0
+    'PASS'
+    exit 0
+} else { 'FAILURES ABOVE'; exit 1 }

@@ -27,7 +27,7 @@ function Test-Theme {
   }
 }
 
-$path = Join-Path $PSScriptRoot '..\themes.json'
+$path = Join-Path $PSScriptRoot '..' 'themes.json'
 $json = Get-Content $path -Raw | ConvertFrom-Json
 # Root must be a JSON object ({} or a map of themes). A null / array / scalar root is malformed and
 # must fail loudly rather than pass as "0 themes".

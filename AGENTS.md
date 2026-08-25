@@ -9,8 +9,10 @@ repeated here.
 - Everything in this repo is world-readable. Never commit machine-specific
   paths, client names, or personal vault locations — use the established
   placeholders (`~/.claude/...`, `<vault>`, `<workdir>`, `you@example.com`,
-  `Acme`, `<your-org>`). The `verify-*.ps1` scripts fail the build on leaked
-  Windows user-profile or drive-root path tokens.
+  `Acme`, `<your-org>`). The `sanitisation` job in `ci.yml`
+  (`.github/scripts/assert_no_private_tokens.py`) fails the build on leaked
+  Windows user-profile paths, drive-root absolute paths, org-name wiring forms,
+  non-placeholder email addresses, and real deployment hostnames.
 - **Sweep the whole tree, not just `skills/`, and not with a plain glob.**
   `.github/`, `.claude/` and `.semgrep/` are dot-directories that `rg` and `**`
   skip by default, so a sweep scoped to `skills/` reports clean while a private
@@ -47,4 +49,7 @@ repeated here.
   `shellcheck: true`) as the first validation step of every job.
 - `.claude/review-policy.json` is the review control plane;
   `review-policy-guard.yml` asserts it stays tracked and unignored. Do not
-  re-add `.gitignore` to its `high` list without removing that guard.
+  re-add `.gitignore` to its `high` list without first removing the
+  corresponding assertion in `review-policy-guard.yml` — and never delete the
+  workflow itself: its job name is a required status check, so a deleted
+  workflow never reports and leaves every PR permanently unmergeable.

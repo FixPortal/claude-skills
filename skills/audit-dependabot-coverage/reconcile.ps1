@@ -59,9 +59,11 @@ $ErrorActionPreference = 'Stop'
 # covered because they correspond to the two PR kinds:
 #   single-dep: "Bumps [nanoid](https://...) from 3.3.16 to 3.3.18."
 #   grouped:    "Updates `@azure/msal-browser` from 5.17.3 to 5.18.0"
-# The branch is NOT used: a grouped branch carries only a hash
+# The branch is NOT used FOR THE PACKAGE NAME: a grouped branch carries only a hash
 # (dependabot/npm_and_yarn/web/npm-minor-and-patch-eff5aeb2ab) and names no package,
 # so branch parsing would miss every grouped fix while looking like it worked.
+# The branch IS used separately for the directory/ecosystem target — see
+# Test-DependabotPrTargetsAlert below.
 function Test-DependabotPrCoversPackage {
     [OutputType([bool])]
     param(
@@ -94,17 +96,74 @@ function Test-DependabotPrCoversPackage {
     return $false
 }
 
+# --- where the fix lands -------------------------------------------------------
+# Package name alone is NOT coverage in a monorepo: one PR bumping a package in /web
+# says nothing about the same package's alert in /api. The alert says where it lives
+# (dependency.manifest_path); the PR says where it applies, in its branch
+# (dependabot/<ecosystem>/<directory...>/<update>) — its body names no directory for
+# a single-dep PR. Both must agree. When the PR's target cannot be established the
+# alert stays UNMATCHED: unresolvable is not covered.
+function Get-AlertTarget {
+    param([AllowNull()]$Alert)
+
+    $manifest = [string](Get-Prop $Alert @('dependency', 'manifest_path') '')
+    if (-not $manifest) { return $null }
+    $m = $manifest.Replace('\', '/').Trim('/')
+    $dir = if ($m.Contains('/')) { ($m -replace '/[^/]+$', '') } else { '' }
+    return [pscustomobject]@{
+        Directory = $dir
+        Ecosystem = [string](Get-Prop $Alert @('dependency', 'package', 'ecosystem') '')
+    }
+}
+
+function Test-DependabotPrTargetsAlert {
+    [OutputType([bool])]
+    param([AllowNull()]$Pr, [AllowNull()]$AlertTarget)
+
+    $branchEcosystems = @{
+        npm_and_yarn = 'npm'; nuget = 'nuget'; bundler = 'rubygems'; cargo = 'rust'
+        gomod = 'go'; maven = 'maven'; gradle = 'maven'; pip = 'pip'; composer = 'composer'
+        pub = 'pub'; swift = 'swift'; docker = 'docker'; terraform = 'terraform'
+    }
+
+    if ($null -eq $Pr -or $null -eq $AlertTarget) { return $false }
+    $ref = [string](Get-Prop $Pr @('head', 'ref') '')
+    $m = [regex]::Match($ref, '^dependabot/(?<eco>[^/]+)/(?<rest>.+)$')
+    if (-not $m.Success) { return $false }
+
+    # The final segment is the update identifier (package-and-version, or a group
+    # hash); everything between it and the ecosystem segment is the target directory.
+    $rest = $m.Groups['rest'].Value
+    $dir = if ($rest.Contains('/')) { ($rest -replace '/[^/]+$', '').Trim('/') } else { '' }
+    if ($dir -ne $AlertTarget.Directory) { return $false }
+
+    $alertEco = $AlertTarget.Ecosystem
+    if ($alertEco) {
+        $mapped = $branchEcosystems[$m.Groups['eco'].Value]
+        # An unmapped ecosystem pair cannot be compared, so it cannot be coverage.
+        if ($null -eq $mapped -or $mapped -ne $alertEco) { return $false }
+    }
+    return $true
+}
+
 # --- gh helpers --------------------------------------------------------------
 # gh writes its error BODY to stdout and only a one-line summary to stderr, so a
 # 403/404 yields a whole JSON document unless the exit status is checked. Every
 # call here honours $LASTEXITCODE rather than inspecting the payload.
+# stderr is captured, not discarded: its one-line summary is the only thing that
+# distinguishes a 403 from a 404 from a network failure, and without it every
+# failure renders as the same "unreadable" row.
 function Invoke-Gh {
     param([Parameter(Mandatory)][string[]]$Arguments, [switch]$AllowFailure)
 
-    $out = & gh @Arguments 2>$null
+    $out = & gh @Arguments 2>&1
     if ($LASTEXITCODE -ne 0) {
-        if ($AllowFailure) { return $null }
-        throw "gh $($Arguments -join ' ') failed with exit $LASTEXITCODE"
+        $detail = (($out | ForEach-Object { "$_" }) -join ' ').Trim()
+        if ($AllowFailure) {
+            Write-Verbose "gh $($Arguments -join ' ') failed (exit $LASTEXITCODE): $detail"
+            return $null
+        }
+        throw "gh $($Arguments -join ' ') failed with exit ${LASTEXITCODE}: $detail"
     }
     return $out
 }
@@ -122,8 +181,10 @@ function Get-RepoList {
         # Derived live, never a hard-coded list: a repo added after this was written
         # would otherwise be silently uncovered, which is the same silent-absence
         # class of failure the script exists to catch.
-        $names = Invoke-Gh @('repo', 'list', $o, '--limit', '200', '--no-archived',
-                             '--json', 'nameWithOwner', '-q', '.[].nameWithOwner')
+        # Paginated via the REST API: `gh repo list --limit N` returns the first N
+        # and exits 0, so every repo past the cap would be silently uncovered.
+        $names = Invoke-Gh @('api', '--paginate', "orgs/$o/repos?per_page=100",
+                             '-q', '.[] | select(.archived == false) | .full_name')
         if ($names) { $all += @($names) }
     }
     return @($all | Where-Object { $_ })
@@ -160,7 +221,8 @@ function ConvertTo-Utc {
 # when it genuinely was. Raised in review of PR #59, whose stated cause was wrong -- the
 # `--author app/dependabot` filter does work, verified as 224 PRs total against 71
 # filtered on your-repo, with non-Dependabot authors excluded -- but the
-# uncovered path it pointed at was real.
+# uncovered path it pointed at was real. (That flag has since been replaced by a
+# local filter over the paginated pulls API; see the main loop.)
 function ConvertFrom-PrListJson {
     param([Parameter(Mandatory)][AllowNull()]$Raw)
 
@@ -239,9 +301,15 @@ foreach ($slug in $repos) {
 
     # Only fetched when the repo actually has open alerts — most repos have none, and
     # this keeps the sweep to roughly one call per repo in the common case.
-    $prsRaw = Invoke-Gh @('pr', 'list', '-R', $slug, '--author', 'app/dependabot',
-        '--state', 'open', '--limit', '100', '--json', 'number,title,body') -AllowFailure
-    $prs = ConvertFrom-PrListJson -Raw $prsRaw
+    # Paginated via the REST API: `gh pr list --limit 100` silently caps at 100, and
+    # every Dependabot PR past the cap would be invisible, so its alerts would report
+    # as uncovered while a fix was in flight. The author filter is applied locally
+    # because the pulls endpoint has none.
+    $prsRaw = Invoke-Gh @('api', '--paginate',
+        "repos/$slug/pulls?state=open&per_page=100") -AllowFailure
+    $allPrs = ConvertFrom-PrListJson -Raw $prsRaw
+    $prs = if ($null -eq $allPrs) { $null }
+           else { ,@($allPrs | Where-Object { (Get-Prop $_ @('user', 'login') '') -eq 'dependabot[bot]' }) }
     if ($null -eq $prs) {
         # Cannot reconcile this repo: with no PR list, every alert would report as
         # uncovered. Say so instead of emitting rows that look like findings.
@@ -261,7 +329,15 @@ foreach ($slug in $repos) {
     # every finding row (raised in review of PR #59). It stays on the object for the
     # -Json consumer, where a row is the natural unit.
     $secState = Get-SecurityUpdateState -Slug $slug
-    if ($secState -ne 'on') {
+    # Unreadable is not unhealthy: 'unknown' means the state could not be READ, which
+    # is a NOT CHECKED row — listing it beside a confirmed DISABLED/PAUSED would
+    # report an unread fact as a health finding.
+    if ($secState -eq 'unknown') {
+        $skipped.Add([pscustomobject]@{
+            Repo   = $slug
+            Reason = 'security-updates state unreadable - not health-checked'
+        })
+    } elseif ($secState -ne 'on') {
         $secWarnings.Add([pscustomobject]@{ Repo = $slug; SecurityUpdates = $secState })
     }
 
@@ -277,8 +353,10 @@ foreach ($slug in $repos) {
             $ageHours = [int]($now - $created).TotalHours
         }
 
+        $target = Get-AlertTarget -Alert $a
         $match = $prs | Where-Object {
-            Test-DependabotPrCoversPackage -Body ([string]$_.body) -PackageName ([string]$pkg)
+            (Test-DependabotPrCoversPackage -Body ([string]$_.body) -PackageName ([string]$pkg)) -and
+            (Test-DependabotPrTargetsAlert -Pr $_ -AlertTarget $target)
         } | Select-Object -First 1
 
         if ($match) { continue }
@@ -339,8 +417,8 @@ if ($sorted.Count -eq 0) {
     $sorted | Format-Table -AutoSize `
         Repo, Alert, Package, Severity, AgeDays, Scope, FirstPatched | Out-String
     ''
-    'Each row is an open alert with no open Dependabot PR naming that package.'
-    'Dependabot may have decided no fix exists -- or decided that WRONGLY. Those are'
+    'Each row is an open alert with no open Dependabot PR naming that package in that'
+    'directory/ecosystem. Dependabot may have decided no fix exists -- or decided that WRONGLY. Those are'
     'indistinguishable from outside, so read the update-job log by hand:'
     '  Insights > Dependency graph > Dependabot > the ecosystem row > Last checked'
     'Before accepting a "cannot update" verdict, read what the PARENT actually declares:'

@@ -131,8 +131,12 @@ if ([string]::IsNullOrWhiteSpace($Instruction)) {
 $sb = [System.Text.StringBuilder]::new()
 [void]$sb.AppendLine($Instruction)
 [void]$sb.AppendLine()
-[void]$sb.AppendLine('STYLE REQUIREMENT: Terse output only. No preamble, no summary, no closing remarks. Per finding: severity + location + one-sentence description + one-sentence fix. Skip any finding you cannot substantiate from the diff.')
-[void]$sb.AppendLine()
+if (-not $FindingsPath) {
+    # Phase-1 style directive only: in Phase 2 (-FindingsPath) the brief owns the
+    # verdict format, and an appended per-finding directive AFTER it conflicts.
+    [void]$sb.AppendLine('STYLE REQUIREMENT: Terse output only. No preamble, no summary, no closing remarks. Per finding: severity + location + one-sentence description + one-sentence fix. Skip any finding you cannot substantiate from the diff.')
+    [void]$sb.AppendLine()
+}
 [void]$sb.AppendLine('--- DIFF UNDER REVIEW ---')
 [void]$sb.AppendLine((Read-InputFile $DiffPath 'Input file'))
 
@@ -187,29 +191,60 @@ $geminiArgs = @(
 $oauthCreds  = Join-Path $HOME '.gemini\oauth_creds.json'
 $hiddenCreds = "$oauthCreds.paused.$PID.$([Guid]::NewGuid().ToString('N'))"
 $movedOAuth  = $false
-if ($env:GEMINI_API_KEY -and (Test-Path $oauthCreds)) {
-    if (Test-Path -LiteralPath $hiddenCreds) {
-        throw "Refusing to shadow Gemini OAuth credentials: backup already exists at $hiddenCreds"
-    }
-    Move-Item -LiteralPath $oauthCreds -Destination $hiddenCreds -ErrorAction Stop
-    $movedOAuth = $true
-}
+# The credential path is a single global per user, and reviewers run concurrently
+# (ForEach-Object -Parallel upstream), so the check-move-run-restore sequence must
+# be serialised process-wide. A named mutex keyed on the credential path does that;
+# a check-then-act without it races two wrappers into the same shadow/restore.
+$mutexName = 'Local\gemini-oauth-shadow-' +
+    [Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData(
+        [System.Text.Encoding]::UTF8.GetBytes($oauthCreds.ToLowerInvariant())))
+$oauthMutex = [System.Threading.Mutex]::new($false, $mutexName)
+$oauthMutexHeld = $false
+$oauthRestoreNote = $null
 
-Push-Location -LiteralPath $scratch
+# The try opens immediately after New-Item so a throw during the OAuth shadow
+# still reaches the finally that removes the scratch dir.
 try {
-    $stdout = ($stdin | & gemini @geminiArgs 2>$errFile) | Out-String
-    $exitCode = $LASTEXITCODE
-    $stderr = (Test-Path $errFile) ? (Get-Content -LiteralPath $errFile -Raw) : ''
+    if ($env:GEMINI_API_KEY) {
+        # An abandoned mutex (a prior wrapper killed mid-run) still acquires; it
+        # throws AbandonedMutexException as it does so, which must not fail the run.
+        try { [void]$oauthMutex.WaitOne() } catch [System.Threading.AbandonedMutexException] { }
+        $oauthMutexHeld = $true
+        if (Test-Path -LiteralPath $oauthCreds) {
+            if (Test-Path -LiteralPath $hiddenCreds) {
+                throw "Refusing to shadow Gemini OAuth credentials: backup already exists at $hiddenCreds"
+            }
+            Move-Item -LiteralPath $oauthCreds -Destination $hiddenCreds -ErrorAction Stop
+            $movedOAuth = $true
+        }
+    }
+
+    Push-Location -LiteralPath $scratch
+    try {
+        $stdout = ($stdin | & gemini @geminiArgs 2>$errFile) | Out-String
+        $exitCode = $LASTEXITCODE
+        $stderr = (Test-Path $errFile) ? (Get-Content -LiteralPath $errFile -Raw) : ''
+    }
+    finally {
+        Pop-Location
+    }
 }
 finally {
-    Pop-Location
     Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
     if ($movedOAuth) {
+        # Never throw here: a throw in finally would discard a completed, paid-for
+        # review captured above. If the creds file reappeared during the run, move
+        # the interloper aside, restore the backup, and warn after the review text
+        # has been written.
         if (Test-Path -LiteralPath $oauthCreds) {
-            throw "Gemini OAuth credentials reappeared during the run; restore the unique backup manually from $hiddenCreds"
+            $aside = "$oauthCreds.reappeared.$([Guid]::NewGuid().ToString('N'))"
+            Move-Item -LiteralPath $oauthCreds -Destination $aside -ErrorAction Stop
+            $oauthRestoreNote = "Gemini OAuth credentials reappeared during the run; the new file was moved aside to $aside and the pre-run credentials were restored."
         }
         Move-Item -LiteralPath $hiddenCreds -Destination $oauthCreds -ErrorAction Stop
     }
+    if ($oauthMutexHeld) { $oauthMutex.ReleaseMutex() }
+    $oauthMutex.Dispose()
 }
 
 if ($exitCode -ne 0) {
@@ -257,6 +292,7 @@ if ($json.stats?.models) {
     # Accumulate this call's usage so it can be written to the sidecar (host reads
     # it for the adversarial-review outcome event) regardless of Observatory posting.
     $sumIn = 0L; $sumOut = 0L; $sumCost = 0.0
+    $costUnknown = $false
 
     foreach ($mProp in $json.stats.models.PSObject.Properties) {
         try {
@@ -268,11 +304,23 @@ if ($json.stats?.models) {
             $thoughts = [long]($tokens.thoughts ?? 0)
             if ($inTok -eq 0 -and $outTok -eq 0) { continue }
 
-            $rateKey = ($gemPricing.Keys | Where-Object { $mProp.Name.StartsWith($_) } | Select-Object -First 1)
-            $rates = $rateKey ? $gemPricing[$rateKey] : @(2.50, 10.0, 3.50)
-            $costUsd = [Math]::Round((
-                ($inTok * $rates[0]) + ($outTok * $rates[1]) + ($thoughts * $rates[2])
-            ) / 1000000.0, 8)
+            # Prefix-match longest key first: hashtable enumeration is bucket-ordered,
+            # so an unsorted match could price gemini-2.5-flash-lite as gemini-2.5-flash.
+            $rateKey = ($gemPricing.Keys |
+                Where-Object { $mProp.Name.StartsWith($_) } |
+                Sort-Object { $_.Length } -Descending |
+                Select-Object -First 1)
+            if ($rateKey) {
+                $rates = $gemPricing[$rateKey]
+                $costUsd = [Math]::Round((
+                    ($inTok * $rates[0]) + ($outTok * $rates[1]) + ($thoughts * $rates[2])
+                ) / 1000000.0, 8)
+            } else {
+                # No fabricated fallback price: an unpriced model is cost-unknown,
+                # not a guess reported as known (the OpenAI wrappers' contract).
+                $costUnknown = $true
+                $costUsd = 0.0
+            }
 
             $sumIn += $inTok; $sumOut += $outTok; $sumCost += $costUsd
 
@@ -310,7 +358,7 @@ if ($json.stats?.models) {
 
     if ($UsageSidecarPath) {
         try {
-            @{ inputTokens = $sumIn; outputTokens = $sumOut; costUsd = [Math]::Round($sumCost, 8) } |
+            @{ inputTokens = $sumIn; outputTokens = $sumOut; costUsd = [Math]::Round($sumCost, 8); costUnknown = $costUnknown } |
                 ConvertTo-Json -Compress | Set-Content -LiteralPath $UsageSidecarPath -Encoding UTF8
         } catch { }
     }
@@ -330,3 +378,8 @@ if ($OutPath) {
 else {
     $response.TrimEnd()
 }
+
+# Warn only now: the restore in the finally above must never throw away a
+# completed review, so a reappeared-credentials note surfaces after the review
+# text has been written.
+if ($oauthRestoreNote) { Write-Warning $oauthRestoreNote }

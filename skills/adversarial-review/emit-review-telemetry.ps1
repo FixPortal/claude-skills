@@ -25,6 +25,15 @@
 .PARAMETER Reviewer
     Vendor id of the reviewer: anthropic | google | openai | moonshot.
 
+.PARAMETER Participant
+    Optional discriminator widening the server's (runId, reviewer, role) upsert key
+    to (runId, reviewer, role, participant). REQUIRED when one vendor fields two
+    participants in a single-diff run (e.g. two anthropic reviewers): the API
+    upserts on (runId, reviewer, role), so without it the second anthropic call
+    REPLACES the first and the run silently loses a participant. Use the manifest
+    reviewer id (B, F, G, X, K). Omit for aggregated batch runs —
+    aggregate-and-emit.ps1 already merges same-vendor participants into one row.
+
 .PARAMETER Role
     The participant's role in the panel: reviewer | judge. REQUIRED -- the API
     rejects (HTTP 400) any run without a valid role, so omitting it means the
@@ -90,6 +99,10 @@ param(
     [ValidateSet('reviewer', 'judge')]
     [string] $Role,
 
+    # See .PARAMETER Participant: a same-vendor second participant collapses onto the
+    # first without this, because the API upserts on (runId, reviewer, role).
+    [string] $Participant = $null,
+
     [string] $Repo = $null,
 
     [string] $Summary = $null,
@@ -138,6 +151,7 @@ $body = @{
     issuesAccepted   = $IssuesAccepted
     runId            = $RunId
     role             = $Role
+    participant      = $Participant
     repo             = $Repo
     summary          = $Summary
     # null for a single-diff run; a positive count flags an aggregated batch run.

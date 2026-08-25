@@ -52,7 +52,8 @@ Apply standard .NET project and solution preferences when creating new projects 
 - `Nullable`: enable
 - `ImplicitUsings`: enable
 - Examples must use syntax compatible with the project's declared language version; do not assume C# 12 features.
-- Read `~/.agents/notes/dotnet-runtime-traps.md` before normalising packages.
+- Read `~/.agents/notes/dotnet-runtime-traps.md` before normalising packages
+  (if that note is not present, proceed and record the assumption).
   Prefer the newest stable release that the target stack can restore, build,
   and test; TFM metadata alone does not prove compatibility. Preserve documented
   exception pins, including `Microsoft.OpenApi` 2.x with the .NET 10
@@ -371,7 +372,7 @@ When scaffolding or normalizing a .NET project, verify:
 - [ ] `nuget.config` maps the <your-org> GitHub Packages feed; `read:packages` token wired via env var (not committed)
 - [ ] NodaTime packages added to `Directory.Packages.props`; `IClock`/`TimeProvider` registered in DI; NodaTime JSON serialization wired (`ConfigureForNodaTime`)
 - [ ] Test project(s) created/normalized — see the `scaffold-tests` skill
-- [ ] Package versions checked against `~/.agents/notes/dotnet-runtime-traps.md` and verified by restore, build, and test; documented pins such as `Microsoft.OpenApi` 2.x preserved
+- [ ] Package versions checked against `~/.agents/notes/dotnet-runtime-traps.md` (if that note is not present, proceed and record the assumption) and verified by restore, build, and test; documented pins such as `Microsoft.OpenApi` 2.x preserved
 - [ ] Thin `.editorconfig` in place (copied from `~/.claude/resources/dotnet-thin.editorconfig`, not the full `~/.claude/resources/.editorconfig`); only documented formatter-compatibility preferences repeat package-owned values
 - [ ] CSharpier `1.3.0` merged into `.config/dotnet-tools.json`; `.gitattributes` and `.csharpierignore` added
 - [ ] `dotnet tool restore` and `dotnet csharpier format .` completed; initial formatting isolated from semantic changes
