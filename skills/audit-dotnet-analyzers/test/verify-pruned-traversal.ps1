@@ -47,7 +47,7 @@ try {
     New-Item -ItemType Directory -Path $cleanRepo | Out-Null
     git -C $cleanRepo init --quiet
     if ($LASTEXITCODE -ne 0) { throw "fixture git init failed (exit $LASTEXITCODE)" }
-    git -C $cleanRepo config user.email 'fixture@example.test'
+    git -C $cleanRepo config user.email 'you@example.com'
     git -C $cleanRepo config user.name 'Prune Fixture'
     Set-Content -LiteralPath (Join-Path $cleanRepo 'Directory.Build.props') -Value '<Project><PropertyGroup><LangVersion>latest</LangVersion></PropertyGroup></Project>'
     git -C $cleanRepo add Directory.Build.props

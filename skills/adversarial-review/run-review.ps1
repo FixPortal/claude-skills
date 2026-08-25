@@ -784,6 +784,22 @@ function Invoke-Round([string] $phaseLabel, [string] $startPattern, [bool] $with
                 }
                 continue
             }
+            # The clean sentinel is a whole-reply contract: a reply that contains it AND
+            # anything else (a Severity field, narration) is mixed, and admitting it via
+            # the other alternation branch would let a hedging reviewer count as clean.
+            if ($phaseLabel -eq 'p1' -and
+                $stripped.Text -match "(?im)$([regex]::Escape($cleanSentinel))" -and
+                -not ($stripped.Text -match $cleanSentinelPattern)) {
+                Write-Warning ("[p1] reviewer $($res.Id) ($($res.Label)) mixed the clean sentinel with other content — " +
+                    'the sentinel is the whole-reply clean contract. NOT counted as a participating vendor; ' +
+                    'text still forwarded to the judge as unpooled.')
+                Set-Content -LiteralPath $res.OutFile -Value "[reviewer off-contract: clean sentinel mixed with other content]`n$($stripped.Text)" -Encoding utf8
+                $script:offContract += [pscustomobject]@{
+                    Phase = $phaseLabel; Id = $res.Id; Label = $res.Label
+                    Vendor = $res.Vendor; Text = $stripped.Text
+                }
+                continue
+            }
             # Phase 2 coverage is advisory, not a gate: a reviewer may legitimately have
             # nothing to say about some pooled findings. Surface the number so a reply
             # covering 3 of 17 is visible rather than indistinguishable from a full one.
@@ -800,6 +816,20 @@ function Invoke-Round([string] $phaseLabel, [string] $startPattern, [bool] $with
                         Sort-Object -Unique
                 )
                 $coveredIds = @($ExpectedFIds | Where-Object { $_ -in $verdictedIds })
+                # A verdict must name an EXPECTED finding id: 'F999: AGREE' satisfies the
+                # line pattern while voting on nothing in the pool, so with zero expected
+                # ids covered the reply is off-contract, not participation.
+                if ($coveredIds.Count -eq 0) {
+                    Write-Warning ("[$phaseLabel] reviewer $($res.Id) ($($res.Label)) verdicts named no pooled finding id " +
+                        "(expected $($ExpectedFIds -join ', ')) — voting outside the pool is not participation. " +
+                        'NOT counted as a participating vendor; text still forwarded to the judge as unpooled.')
+                    Set-Content -LiteralPath $res.OutFile -Value "[reviewer off-contract: no verdict for any pooled finding id]`n$($stripped.Text)" -Encoding utf8
+                    $script:offContract += [pscustomobject]@{
+                        Phase = $phaseLabel; Id = $res.Id; Label = $res.Label
+                        Vendor = $res.Vendor; Text = $stripped.Text
+                    }
+                    continue
+                }
                 $script:p2Coverage[$res.Id] = [ordered]@{
                     covered   = $coveredIds
                     abstained = @($ExpectedFIds | Where-Object { $_ -notin $coveredIds })

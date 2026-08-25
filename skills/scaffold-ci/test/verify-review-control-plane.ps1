@@ -83,7 +83,7 @@ $checker = Get-Content $checkerPath -Raw
 # scaffolded repo copies from, and the live copy gating THIS repository. A text check on
 # the asset alone certifies nothing about the copy that actually runs here - compare
 # bytes, so the two cannot drift apart silently.
-$liveCheckerPath = Join-Path $root '..' '..' '.github' 'scripts' 'assert_workflow_hygiene.py'
+$liveCheckerPath = Join-Path (Join-Path (Join-Path (Join-Path $root '..') '..') '.github') (Join-Path 'scripts' 'assert_workflow_hygiene.py')
 if (-not (Test-Path -LiteralPath $liveCheckerPath -PathType Leaf)) {
     throw 'live hygiene checker missing at .github/scripts/assert_workflow_hygiene.py; the asset has no live copy to stay in parity with'
 }

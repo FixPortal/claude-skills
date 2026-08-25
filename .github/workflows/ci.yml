@@ -125,10 +125,14 @@ jobs:
               $threw = $_
             }
             if ($output) { Write-Host $output }
-            # A skip is not a pass: a verifier that printed `SKIP: <reason>` verified
-            # nothing (or only partly), so it is counted as skipped — not passed — and
-            # stays visible in the summary.
+            # A WHOLE-verifier skip is not a pass: a verifier whose output is only
+            # `SKIP: <reason>` lines verified nothing and is counted as skipped, so an
+            # all-skip run fails the guard below. A PARTIAL skip (SKIP lines alongside
+            # real assertion output) still verified something and counts as passed —
+            # classifying it as skipped would let a lone partial-skip verifier fail the
+            # all-skip guard on a run that did verify.
             $skipLines = ([regex]::Matches("$output", '(?m)^SKIP:')).Count
+            $substantiveLines = @("$output" -split '\r?\n' | Where-Object { $_.Trim() -and $_ -notmatch '^\s*SKIP:' }).Count
             $exitCode = $global:LASTEXITCODE
             if ($threw) {
               $failed += "$($verifier.FullName) (threw: $threw)"
@@ -136,7 +140,7 @@ jobs:
             elseif ($null -ne $exitCode -and $exitCode -ne 0) {
               $failed += "$($verifier.FullName) (exit code $exitCode)"
             }
-            elseif ($skipLines -gt 0) {
+            elseif ($skipLines -gt 0 -and $substantiveLines -eq 0) {
               $skipped++
             }
             else {
