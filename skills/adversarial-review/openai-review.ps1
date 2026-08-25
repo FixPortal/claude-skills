@@ -186,6 +186,17 @@ $response = $null
 # OpenAI Chat Completions endpoint (a public vendor URL, not a secret).
 $openAiBaseUrl = [string]::IsNullOrWhiteSpace($env:OPENAI_BASE_URL) ? 'https://api.openai.com/v1' : $env:OPENAI_BASE_URL.TrimEnd('/')
 
+# The API key rides the Authorization header on EVERY request below, so an
+# override pointing at plain http:// would transmit the credential in the clear.
+# Require an absolute https:// URI before any request is attempted.
+$openAiBaseUri = $null
+if (-not [System.Uri]::TryCreate($openAiBaseUrl, [System.UriKind]::Absolute, [ref] $openAiBaseUri) -or
+    $openAiBaseUri.Scheme -ne 'https') {
+    Write-Error ("OPENAI_BASE_URL must be an absolute https:// URI (got '$openAiBaseUrl'); " +
+        'the API key is sent in the Authorization header on every request, so plain HTTP would expose it.')
+    exit 1
+}
+
 for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
     try {
         $response = Invoke-RestMethod `

@@ -231,20 +231,34 @@ try {
 }
 finally {
     Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
-    if ($movedOAuth) {
-        # Never throw here: a throw in finally would discard a completed, paid-for
-        # review captured above. If the creds file reappeared during the run, move
-        # the interloper aside, restore the backup, and warn after the review text
-        # has been written.
-        if (Test-Path -LiteralPath $oauthCreds) {
-            $aside = "$oauthCreds.reappeared.$([Guid]::NewGuid().ToString('N'))"
-            Move-Item -LiteralPath $oauthCreds -Destination $aside -ErrorAction Stop
-            $oauthRestoreNote = "Gemini OAuth credentials reappeared during the run; the new file was moved aside to $aside and the pre-run credentials were restored."
+    try {
+        if ($movedOAuth) {
+            # Never throw here: a throw in finally would discard a completed, paid-for
+            # review captured above. If the creds file reappeared during the run, move
+            # the interloper aside, restore the backup, and warn after the review text
+            # has been written. A FAILED restore (locked file, AV scan) must degrade to
+            # the same warning, leaving the uniquely-named backup in place for a manual
+            # restore — the review is already paid for and is never discarded.
+            try {
+                if (Test-Path -LiteralPath $oauthCreds) {
+                    $aside = "$oauthCreds.reappeared.$([Guid]::NewGuid().ToString('N'))"
+                    Move-Item -LiteralPath $oauthCreds -Destination $aside -ErrorAction Stop
+                    $oauthRestoreNote = "Gemini OAuth credentials reappeared during the run; the new file was moved aside to $aside and the pre-run credentials were restored."
+                }
+                Move-Item -LiteralPath $hiddenCreds -Destination $oauthCreds -ErrorAction Stop
+            }
+            catch {
+                $oauthRestoreNote = ("Failed to restore the pre-run Gemini OAuth credentials ($($_.Exception.Message)); " +
+                    "the backup remains at $hiddenCreds — restore it to $oauthCreds by hand.")
+            }
         }
-        Move-Item -LiteralPath $hiddenCreds -Destination $oauthCreds -ErrorAction Stop
     }
-    if ($oauthMutexHeld) { $oauthMutex.ReleaseMutex() }
-    $oauthMutex.Dispose()
+    finally {
+        # Mutex release/dispose live in their own finally so a failed restore above
+        # cannot strand the named mutex for the other in-flight reviewers.
+        if ($oauthMutexHeld) { $oauthMutex.ReleaseMutex() }
+        $oauthMutex.Dispose()
+    }
 }
 
 if ($exitCode -ne 0) {

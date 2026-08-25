@@ -79,6 +79,18 @@ try {
     $argsText = Get-Content $capture -Raw
     if ($argsText -notlike '*--effort low*') { throw "-Effort low was not passed through for an unsuffixed model: $argsText" }
 
+    # The panel-contract values xhigh/max must FOLD to --effort high (the agy CLI
+    # accepts only low/medium/high); passing them through would die at the CLI.
+    foreach ($folded in @('xhigh', 'max')) {
+        & pwsh -NoProfile -File $wrapper -InstructionPath $brief -DiffPath $diff `
+            -ContextPath "$context1;$context2" -Model 'gemini-3.1-pro' -Effort $folded `
+            -OutPath $out
+        if ($LASTEXITCODE -ne 0) { throw "wrapper exited $LASTEXITCODE on -Effort $folded" }
+        $argsText = Get-Content $capture -Raw
+        if ($argsText -notlike '*--effort high*') { throw "-Effort $folded must fold to '--effort high': $argsText" }
+        if ($argsText -like "*--effort $folded*") { throw "-Effort $folded leaked through to the CLI unchanged: $argsText" }
+    }
+
     'agy-review.ps1 OK'
 }
 finally {

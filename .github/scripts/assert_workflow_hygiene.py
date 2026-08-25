@@ -119,6 +119,13 @@ def action_refs(document):
     return refs
 
 
+# Workflows permitted the target-context trigger under the written-rationale
+# exemption in main(): each never checks out or executes PR code (API reads
+# against the base ref only; writes are label operations). The gate fails any
+# exempted workflow that uses actions/checkout.
+TARGET_TRIGGER_NO_CHECKOUT = ("review-tier.yml",)
+
+
 def is_pinned(ref):
     """True when the ref names an immutable revision.
 
@@ -167,7 +174,25 @@ def main():
             # base repo's context, while able to check out attacker-controlled head
             # code. It has legitimate uses; none should land without being argued
             # for, so it is refused here rather than reviewed by glob.
+            #
+            # Written-rationale exemption: the workflows named in
+            # TARGET_TRIGGER_NO_CHECKOUT are permitted the trigger ONLY because they
+            # never check out or execute PR code — every read is an API call against
+            # the base ref, and the only writes are label operations. The exemption
+            # is enforced below: any actions/checkout use in an exempted workflow
+            # fails the gate. Add a workflow to the tuple only with the same
+            # no-checkout property argued in its own header comment.
             if event == "pull_request_target":
+                if path.name in TARGET_TRIGGER_NO_CHECKOUT:
+                    body = path.read_text(encoding="utf-8")
+                    if "actions/checkout" in body:
+                        print(
+                            f"::error file={path}::Exempted from the target-context trigger ban on "
+                            "the written rationale that it never checks out PR code, but it uses "
+                            "actions/checkout. Remove the checkout or the exemption."
+                        )
+                        failed = True
+                    continue
                 print(
                     f"::error file={path}::This workflow uses the target-context trigger, which grants "
                     "a write token and repository secrets to a workflow that can check out untrusted "
@@ -190,10 +215,21 @@ def main():
             # actions/* is GitHub's own namespace, and the house standard is the
             # INVERSE of the third-party rule: first-party actions take the major
             # tag, and audit-ci grades a SHA-pinned first-party action as drift.
-            # A tag-pinned actions/* ref is therefore conformant, not a finding --
-            # counted here only so the summary shows the split.
+            # "Take the major tag" is enforced here, not assumed: a branch ref
+            # (actions/checkout@main) or a bare action name is just as mutable as
+            # an unpinned third-party tag and can move after review.
             if ref.startswith("actions/"):
-                first_party_tag += 1
+                revision = ref.rsplit("@", 1)[1] if "@" in ref else ""
+                if revision.startswith("v") and revision[1:].isdigit():
+                    # Conformant -- counted only so the summary shows the split.
+                    first_party_tag += 1
+                else:
+                    print(
+                        f"::error file={path}::First-party action '{ref}' (job '{job}') is not on "
+                        "the vN major tag. A branch ref or a bare action name is mutable and can "
+                        "change after review."
+                    )
+                    failed = True
             else:
                 print(
                     f"::error file={path}::Third-party action '{ref}' (job '{job}') is not pinned to "

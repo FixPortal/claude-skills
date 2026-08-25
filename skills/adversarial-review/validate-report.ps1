@@ -106,14 +106,17 @@ if ($violations) {
 # A Phase-4-covered finding (every Critical, every High, every contested) must carry a
 # **Verification** line, or a REFUTED verdict has no home and the tally keeps counting a
 # dead finding. Anchored on the house-style severity line (`**High** · [...]`) so tally
-# tables and prose mentions of a severity do not trip it.
+# tables and prose mentions of a severity do not trip it. A [contested] tag anywhere in
+# the block triggers the same requirement regardless of severity — the phase-3 brief
+# mandates Verification on every contested finding, including a contested Medium/Low.
 $unverified = foreach ($file in $files) {
     $text = Get-Content -LiteralPath $file.FullName -Raw
     if (-not $text) { continue }
     $blocks = [regex]::Matches($text, '(?ms)^### .+?(?=^### |\z)')
     foreach ($block in $blocks) {
-        if ($block.Value -match '(?m)^\*\*(Critical|High)\*\*\s*·' -and
-            $block.Value -notmatch '\*\*Verification\*\*') {
+        $verificationRequired = $block.Value -match '(?m)^\*\*(Critical|High)\*\*\s*·' -or
+            $block.Value -match '\[contested\]'
+        if ($verificationRequired -and $block.Value -notmatch '\*\*Verification\*\*') {
             [pscustomobject]@{
                 File  = $file.FullName
                 Line  = ($text.Substring(0, $block.Index) -split "`n").Count
@@ -125,11 +128,11 @@ $unverified = foreach ($file in $files) {
 
 if ($unverified) {
     foreach ($u in $unverified) {
-        Write-Host "$($u.File):$($u.Line): missing-verification - Critical/High finding block has no **Verification** line"
+        Write-Host "$($u.File):$($u.Line): missing-verification - Critical/High/contested finding block has no **Verification** line"
         Write-Host "  $($u.Title)"
     }
     Write-Host ''
-    Write-Host "$(@($unverified).Count) unverified Critical/High finding(s) across $($files.Count) deliverable(s)."
+    Write-Host "$(@($unverified).Count) unverified Critical/High/contested finding(s) across $($files.Count) deliverable(s)."
     exit 1
 }
 

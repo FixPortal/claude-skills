@@ -107,21 +107,26 @@ Get-ChildItem skills -Recurse -Filter 'verify-*.ps1' |
   Where-Object Name -ne 'verify-collect.ps1' |
   Sort-Object FullName |
   ForEach-Object {
+    # Capture the path BEFORE try: inside catch, $_ rebinds to the ErrorRecord (which
+    # has no FullName), so a failure recorded as $_.FullName would print an empty name.
+    $verifier = $_.FullName
     # Reset BEFORE each verifier: a negative-path verifier runs a child that is
     # *supposed* to fail and asserts its exit code, and that native status must not
     # leak into the next script's result. A nonzero code after a verifier is that
     # verifier's own failure.
     $global:LASTEXITCODE = 0
-    try { & $_.FullName }
-    catch { $failed += $_.FullName; return }
-    if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) { $failed += $_.FullName }
+    try { & $verifier }
+    catch { $failed += $verifier; return }
+    if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) { $failed += $verifier }
   }
 if ($failed) { Write-Host "Failed: $($failed -join ', ')"; exit 1 }
 ```
 
 CI does the same, except a pull request that only touches files under
-`skills/<name>/` runs just that skill's verifiers — anything outside `skills/`
-widens the run back to everything. Verifiers that spawn a deliberately failing
+`skills/<name>/` runs just that skill's verifiers — anything outside `skills/`, or a
+loose file directly under `skills/`, widens the run back to everything. A verifier
+that reads a sibling skill's contract also runs when that sibling changes (the mapping
+lives in `ci.yml`). Verifiers that spawn a deliberately failing
 child clear its exit code on their own success path, so the code a passing
 verifier leaves behind is always 0.
 

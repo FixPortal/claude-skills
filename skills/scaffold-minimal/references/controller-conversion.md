@@ -145,7 +145,12 @@ the content type change, which is exactly the observable contract this skill pro
 to touch, and `.Produces<string>()` only sets metadata so it hides the difference rather
 than fixing it. A `string`-returning action is the one case where the minimal-API default
 is not the faithful conversion. Where the action returns a DTO, `TypedResults.Ok` is
-correct — both sides JSON-serialise identically.
+correct only when both sides serialise identically — and that is a configuration
+question, not a default. MVC and minimal APIs carry independent JSON options (naming
+policies, converters, null handling), so a `JsonOptions` drift on either side changes
+the DTO body even though both "JSON-serialise". Check both configurations and add a
+body/content-type parity test before replacing the controller; if the serialisers
+cannot be made equivalent, retain the controller.
 
 One caveat on the default above: `text/plain` is what MVC serves for the default
 `Accept: */*` case. A request with a concrete `Accept: application/json` negotiates

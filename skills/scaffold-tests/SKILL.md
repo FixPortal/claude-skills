@@ -132,7 +132,7 @@ public async Task Shutdown_WhenSendIsBlocked_ReturnsWithoutCompletingSend()
 }
 ```
 
-This form is **xUnit v3 only** — `TestContext.Current` and `[Fact(Timeout = ...)]` do not exist in v2. On a kept xUnit v2 suite, back the ceiling with a token source:
+**xUnit v3 only** — `TestContext.Current` is absent in v2. `[Fact(Timeout = ...)]` exists (v2.4+) but is documented undefined under parallelization, so prefer a token source on a kept xUnit v2 suite:
 
 ```csharp
 using var ceiling = new CancellationTokenSource();

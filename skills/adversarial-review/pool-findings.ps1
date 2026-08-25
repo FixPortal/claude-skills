@@ -7,8 +7,10 @@
 # The Phase-1 admission start pattern. Pooling splits on exactly the pattern that
 # admitted the reviewer: previously the pooler opened a block only on the literal
 # '^### ', so admitted forms ('## ', '#### ', '- ### ', '  ### ', '**###**') pooled
-# ZERO findings while the vendor still counted toward minVendors.
-$script:FindingHeadingPattern = '^\s*(?:[-*+]\s+)?(?:\*\*|__)?#{1,6}\s'
+# ZERO findings while the vendor still counted toward minVendors. The emphasis
+# group appears on BOTH sides of the hashes: '**###** Finding' carries a closing
+# marker where a one-sided pattern demands whitespace, and pooled zero again.
+$script:FindingHeadingPattern = '^\s*(?:[-*+]\s+)?(?:\*\*|__)?#{1,6}(?:\*\*|__)?\s'
 
 function Split-FindingBlocks([string] $Text) {
     # Returns one string per finding block in a reviewer's stripped Phase-1 output,

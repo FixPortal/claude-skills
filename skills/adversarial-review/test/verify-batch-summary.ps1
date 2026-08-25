@@ -24,14 +24,18 @@ foreach ($s in @($batch, $agg)) {
 
 $savedApiKey = $env:OBSERVATORY_API_KEY
 $savedUrl = $env:OBSERVATORY_URL
-$env:OBSERVATORY_API_KEY = ''
-$env:OBSERVATORY_URL     = ''
 
+# $root is computed BEFORE try (a Join-Path cannot fail on a fresh guid), but the
+# env clearing and fixture creation go INSIDE it: a fixture-creation failure before
+# try would skip the finally and leave the caller's telemetry vars blanked.
 $root = Join-Path ([IO.Path]::GetTempPath()) ('ar-batch-summary-test-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
-$fakeRepo = Join-Path $root 'not-a-repo'
-New-Item -ItemType Directory -Path $fakeRepo -Force | Out-Null
 
 try {
+    $env:OBSERVATORY_API_KEY = ''
+    $env:OBSERVATORY_URL     = ''
+
+    $fakeRepo = Join-Path $root 'not-a-repo'
+    New-Item -ItemType Directory -Path $fakeRepo -Force | Out-Null
     function New-Manifest([string] $path, [string[]] $ids, [string] $labelPrefix = 'chunk') {
         @($ids | ForEach-Object { [pscustomobject]@{ id = $_; label = "$labelPrefix $_" } }) |
             ConvertTo-Json -Depth 5 -AsArray | Set-Content -LiteralPath $path -Encoding utf8

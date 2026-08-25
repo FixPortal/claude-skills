@@ -81,7 +81,9 @@ repository-local manifest is authoritative.
 ### ADR (Architecture Decision Record)
 
 ```
----  frontmatter only for a destination with a parser; OMIT for an ordinary repo-committed ADR  ---
+---
+# Frontmatter only for a destination with a parser; for an ordinary
+# repo-committed ADR omit the whole frontmatter block, both delimiters included.
 title: ADR-NNN — <decision title>
 date: YYYY-MM-DD
 status: proposed | accepted | deprecated | superseded by ADR-NNN
