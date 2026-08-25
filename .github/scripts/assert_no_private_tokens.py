@@ -10,11 +10,12 @@ clean while a private slug sits in `.github/` — which is exactly how one reach
 Four classes, all matched against the public placeholder vocabulary in AGENTS.md
 (`~/.claude/...`, `<vault>`, `<workdir>`, `you@example.com`, `Acme`, `<your-org>`):
 
-1. Windows user-profile paths — `C:\\Users\\<real-name>`. A placeholder `<name>` and the
-   machine-standard accounts (Public, Default) are not a leak; any other name is.
-2. Drive-root absolute paths — a multi-segment `X:\\...\\...` path is a machine layout,
-   never portable documentation. Single-segment and regex-shaped text (``D:\\s``) are
-   not matched.
+1. Windows user-profile paths — a drive root, the `Users` directory, then a real
+   account name. A placeholder `<name>` and the machine-standard accounts (Public,
+   Default) are not a leak; any other name is.
+2. Drive-root absolute paths — a multi-segment absolute path with a drive letter is
+   a machine layout, never portable documentation. Single-segment and regex-shaped
+   text are not matched.
 3. Org-name wiring forms — the dotted namespace, environment-variable, and package-scope
    forms of the organisation name. Prose mentions are not matched; these forms only ever
    appear as real wiring. The tokens are assembled from fragments so this gate does not
