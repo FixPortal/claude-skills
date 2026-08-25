@@ -34,6 +34,35 @@ try {
     if ('latest' -notin $values -or 'should-not-appear' -in $values) {
         throw "Traversal did not prune node_modules before inventory: $($values -join ', ')"
     }
+    # The fixture's .git is an empty directory, so `git status` FAILS there by design.
+    if (-not $result.Repositories[0].GitStatusFailed -or $null -ne $result.Repositories[0].Mutated) {
+        throw 'A repo whose git status cannot be read must report GitStatusFailed and Mutated=$null'
+    }
+
+    # A REAL clean repo: `git status --porcelain` exits 0 with NO output. The status
+    # capture must read that as success (Mutated=$false), not collapse it into the
+    # failed-capture shape -- an empty status array unrolls to $null on the pipeline,
+    # which is exactly the regression this guards.
+    $cleanRepo = Join-Path $tempRoot 'clean-repo'
+    New-Item -ItemType Directory -Path $cleanRepo | Out-Null
+    git -C $cleanRepo init --quiet
+    if ($LASTEXITCODE -ne 0) { throw "fixture git init failed (exit $LASTEXITCODE)" }
+    git -C $cleanRepo config user.email 'fixture@example.test'
+    git -C $cleanRepo config user.name 'Prune Fixture'
+    Set-Content -LiteralPath (Join-Path $cleanRepo 'Directory.Build.props') -Value '<Project><PropertyGroup><LangVersion>latest</LangVersion></PropertyGroup></Project>'
+    git -C $cleanRepo add Directory.Build.props
+    if ($LASTEXITCODE -ne 0) { throw "fixture git add failed (exit $LASTEXITCODE)" }
+    git -C $cleanRepo commit --quiet -m 'chore: fixture'
+    if ($LASTEXITCODE -ne 0) { throw "fixture git commit failed (exit $LASTEXITCODE)" }
+
+    $cleanResult = & $inventory -Path $cleanRepo 3>$null | ConvertFrom-Json
+    $clean = $cleanResult.Repositories[0]
+    if ($clean.GitStatusFailed) {
+        throw 'A CLEAN repo must not report GitStatusFailed - the empty status capture is success, not failure'
+    }
+    if ($clean.Mutated -ne $false) {
+        throw "A clean repo must report Mutated=`$false, got '$($clean.Mutated)'"
+    }
 }
 finally {
     if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force }

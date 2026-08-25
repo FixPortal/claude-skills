@@ -35,8 +35,16 @@ if ($npmMajor -lt 11) {
 # "registry unreachable" (SKIP), not "floors broken". A genuine resolution failure -
 # ERESOLVE, a peer conflict, a yanked version - still throws.
 function Test-RegistryUnreachable([string] $Output) {
-    return $Output -match '(?i)EAI_AGAIN|ENOTFOUND|ECONNREFUSED|ECONNRESET|ETIMEDOUT|ESOCKETTIMEDOUT|EAI_FAIL|fetch failed|network request to .* failed'
+    return $Output -match '(?i)EAI_AGAIN|ENOTFOUND|ECONNREFUSED|ECONNRESET|ETIMEDOUT|ESOCKETTIMEDOUT|EAI_FAIL|E50[234]|ERR_SOCKET_TIMEOUT|EHOSTUNREACH|ENETUNREACH|fetch failed|network request to .* failed'
 }
+
+# Classifier self-test: every transient code npm 12 prints must take the retry/SKIP
+# path (E502/E503/E504, ERR_SOCKET_TIMEOUT, EHOSTUNREACH, ENETUNREACH were the misses),
+# and a genuine resolution failure must still throw.
+foreach ($code in 'EAI_AGAIN','ENOTFOUND','ECONNREFUSED','ECONNRESET','ETIMEDOUT','ESOCKETTIMEDOUT','EAI_FAIL','E502','E503','E504','ERR_SOCKET_TIMEOUT','EHOSTUNREACH','ENETUNREACH') {
+    if (-not (Test-RegistryUnreachable "npm error code $code")) { throw "Test-RegistryUnreachable misses transient npm code: $code" }
+}
+if (Test-RegistryUnreachable 'npm error code ERESOLVE') { throw 'Test-RegistryUnreachable swallows ERESOLVE; resolution failures must throw' }
 
 function Invoke-NpmWithRetry([string] $What, [string[]] $Arguments) {
     # Returns the captured output on success, $null when the registry stayed unreachable

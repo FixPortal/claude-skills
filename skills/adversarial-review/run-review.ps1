@@ -125,9 +125,11 @@ $emptyTree = '4b825dc642cb6eb9a060e54bf8d69288fbee4904'
 
 # The canonical clean sentinel (pinned by briefs/phase1-review.txt): a reviewer whose
 # entire reply is this heading PARTICIPATED and found nothing. It counts toward vendor
-# diversity with issuesRaised = 0 and contributes no pooled finding.
+# diversity with issuesRaised = 0 and contributes no pooled finding. The match must be
+# EXACT — anchored to the whole stripped reply, no (?m) — or a sentinel line plus
+# narration (or malformed findings) would pass admission and count toward diversity.
 $cleanSentinel = 'No substantive defects'
-$cleanSentinelPattern = "(?m)^\s*(?:[-*+]\s+)?(?:\*\*|__)?#{1,6}\s*$cleanSentinel\s*$"
+$cleanSentinelPattern = "^\s*(?:[-*+]\s+)?(?:\*\*|__)?#{1,6}(?:\*\*|__)?\s*$cleanSentinel\s*$"
 
 # Normalize Pathspec: when called via pwsh -File from a subprocess, multi-element arrays
 # can't be passed as separate tokens without binding errors. Callers join with ';' instead.
@@ -401,6 +403,26 @@ try { $preflight = Get-Content -LiteralPath $preflightFile -Raw | ConvertFrom-Js
 catch { Die "preflight.json is not valid JSON ($($_.Exception.Message)): $preflightFile" 2 }
 if ($preflight -isnot [System.Management.Automation.PSCustomObject]) {
     Die "preflight.json must be a JSON object mapping wrapper name to pre-flight result: $preflightFile" 2
+}
+# An object that merely parses is not evidence. Every wrapper this run can invoke —
+# each enabled reviewer's primary AND its declared fallbackWrapper — must carry an
+# explicit 'pass' record, or the paid fan-out discovers the dead CLI mid-round, one
+# reviewer at a time (the failure mode preflight.json exists to prevent).
+$requiredPreflightWrappers = @(
+    @($reviewers | ForEach-Object { [string]$_.wrapper }) +
+    @($reviewers | Where-Object { $_.fallbackWrapper } | ForEach-Object { [string]$_.fallbackWrapper }) |
+        Sort-Object -Unique
+)
+$preflightGaps = @(
+    $requiredPreflightWrappers | Where-Object {
+        $preflight.PSObject.Properties.Name -notcontains $_ -or
+        [string]$preflight.$_ -ne 'pass'
+    }
+)
+if ($preflightGaps) {
+    Die ("preflight.json does not record a passing pre-flight for required wrapper(s): $($preflightGaps -join ', ') " +
+        "(file: $preflightFile). Run each enabled wrapper's PREFLIGHT_COMMAND and record the result before " +
+        'starting the panel — a missing or non-pass record is not evidence the CLI works.') 2
 }
 
 Set-Content -LiteralPath $diffFile -Value $raw -Encoding utf8
@@ -769,7 +791,15 @@ function Invoke-Round([string] $phaseLabel, [string] $startPattern, [bool] $with
             # judge packet) as explicit abstentions, so the judge can tell a considered
             # silence from absence and never rests [unanimous] on one vote plus silence.
             if ($ExpectedFIds -and $ExpectedFIds.Count -gt 0) {
-                $coveredIds = @($ExpectedFIds | Where-Object { $stripped.Text -match "\b$([regex]::Escape($_))\b" })
+                # Coverage is derived from PARSED verdict lines only — a bare mention
+                # of an F-id in prose ("F12 and F13 both agree") is not a verdict, and
+                # counting it would read silence as a considered abstention.
+                $verdictedIds = @(
+                    [regex]::Matches($stripped.Text, "(?im)$p2VerdictLine") |
+                        ForEach-Object { ([regex]::Match($_.Value, 'F\d+')).Value.ToUpperInvariant() } |
+                        Sort-Object -Unique
+                )
+                $coveredIds = @($ExpectedFIds | Where-Object { $_ -in $verdictedIds })
                 $script:p2Coverage[$res.Id] = [ordered]@{
                     covered   = $coveredIds
                     abstained = @($ExpectedFIds | Where-Object { $_ -notin $coveredIds })
@@ -793,7 +823,7 @@ function Invoke-Round([string] $phaseLabel, [string] $startPattern, [bool] $with
 # status.json reporting four Phase-2 vendors where five reviewers had taken part. Forwarding the
 # text to the judge limited the damage but left every consensus tally wrong for that chunk.
 $p1Admission = "(?:\*\*Severity:\*\*)|$cleanSentinelPattern"
-$p1ok = Invoke-Round 'p1' '^\s*(?:[-*+]\s+)?(?:\*\*|__)?#{1,6}\s' $false @() $p1Admission 'structured finding field or the clean sentinel'
+$p1ok = Invoke-Round 'p1' '^\s*(?:[-*+]\s+)?(?:\*\*|__)?#{1,6}(?:\*\*|__)?\s' $false @() $p1Admission 'structured finding field or the clean sentinel'
 if (-not $p1ok) { Die 'No reviewer produced Phase 1 findings; cannot continue.' }
 $p1Vendors = ($p1ok.Vendor | Sort-Object -Unique).Count
 if ($p1Vendors -lt $minVendors) {
@@ -861,6 +891,14 @@ $expectedFIds = if ($findingId -gt 0) { @(1..$findingId | ForEach-Object { "F$_"
 # `F\d+\s` matched prose such as "F12 and F13 both agree" and "F5 findings were raised", which
 # would admit narration as though it were a verdict block.
 $p2VerdictPattern = '^\s*(?:[-*+]\s+)?(?:\*\*|__|\*|_)?F\d+(?:(?:\*\*|__|\*|_)\s*[:.\)\s]|\s*[:.\)])'
+# An F-id followed by arbitrary text is not a verdict. The contract vocabulary
+# (briefs/phase2-cross-examine.txt) is AGREE | FALSE POSITIVE | NEEDS EVIDENCE, with
+# NEEDS REPO the brief's explicit no-repo-access answer; admission and coverage key
+# on a verdict line carrying one of those keywords, never on the F-id alone.
+# Word-bounded on BOTH sides: without the leading \b, 'disagree' contains 'AGREE'
+# and arbitrary text after an F-id would still pass as a verdict.
+$p2VerdictKeyword = '\b(?:AGREE|FALSE\s+POSITIVE|NEEDS\s+EVIDENCE|NEEDS\s+REPO)\b'
+$p2VerdictLine = "$p2VerdictPattern[^\r\n]*?$p2VerdictKeyword"
 if ($findingId -eq 0) {
     # Every participating reviewer returned the clean sentinel (or nothing poolable):
     # the pool is EMPTY but the panel DID convene. That is a clean chunk, not a
@@ -874,9 +912,10 @@ if ($findingId -eq 0) {
 else {
     # Admission requires at least one valid F# verdict: with findings on the table, a
     # heading plus prose ('### Analysis') is not cross-examination and must not count
-    # toward minVendors.
-    $p2Admission = "(?m)$p2VerdictPattern"
-    $p2ok = Invoke-Round 'p2' "$p2VerdictPattern|^\s*(?:[-*+]\s+)?(?:\*\*|__)?#{1,6}\s" $true $expectedFIds $p2Admission 'F# verdict'
+    # toward minVendors. The verdict LINE pattern (F-id + contract keyword) is what
+    # counts — the bare F-id pattern only LOCATES the section.
+    $p2Admission = "(?im)$p2VerdictLine"
+    $p2ok = Invoke-Round 'p2' "$p2VerdictPattern|^\s*(?:[-*+]\s+)?(?:\*\*|__)?#{1,6}(?:\*\*|__)?\s" $true $expectedFIds $p2Admission 'F# verdict'
     if (-not $p2ok) { Die 'No reviewer produced Phase 2 cross-examinations; cannot continue.' }
     $p2Vendors = ($p2ok.Vendor | Sort-Object -Unique).Count
     if ($p2Vendors -lt $minVendors) {

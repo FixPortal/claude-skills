@@ -36,7 +36,7 @@ foreach ($needle in '../close/references/topic-key.ps1',
         throw "recap missing collision-resistant topic derivation: $needle"
     }
 }
-foreach ($needle in '$recipePath = (Resolve-Path (Join-Path $PSScriptRoot ''..'' ''close'' ''references'' ''topic-key.ps1'')).Path',
+foreach ($needle in '$recipePath = (Resolve-Path (Join-Path (Join-Path (Join-Path (Join-Path $PSScriptRoot ''..'') ''close'') ''references'') ''topic-key.ps1'')).Path',
                      '. $recipePath',
                      '$topicInfo = Get-RepositoryTopicInfo -RepositoryRoot $repoRoot',
                      '$repoDisplayName = $topicInfo.DisplayName',
@@ -85,7 +85,7 @@ if ($text -notmatch [regex]::Escape('references/recall-icm-topics.ps1')) {
     throw 'recap does not use the executable exact-topic ICM recall contract'
 }
 
-$recallScript = Join-Path (Join-Path $PSScriptRoot '..') 'references' 'recall-icm-topics.ps1'
+$recallScript = Join-Path (Join-Path (Join-Path $PSScriptRoot '..') 'references') 'recall-icm-topics.ps1'
 if (-not (Test-Path $recallScript -PathType Leaf)) {
     throw 'recap missing executable exhaustive ICM recall helper'
 }
@@ -126,7 +126,26 @@ if ($mixedAfter.Count -ne 1 -or $mixedAfter[0].Failed -or $mixedAfter[0].Bodies.
     throw 'recap ICM recall stopped the loop at the failed topic'
 }
 
-$workingStateScript = Join-Path (Join-Path $PSScriptRoot '..') 'references' 'get-working-state.ps1'
+# A malformed-JSON response must fail the same way an invocation exception does: empty
+# Bodies, Failed=$true, a non-empty Error, and the NEXT topic still processed. An
+# unguarded ConvertFrom-Json would either kill the loop or pass a partial parse off as
+# a complete recall - both silently corrupt the context recap builds on.
+$badJson = @(& $recallScript -Topics @('context-malformed', 'decisions-ok') -InvokeIcm {
+    param([string[]]$Arguments)
+    if ($Arguments[2] -eq 'context-malformed') { 'this is not json {' }
+    else { [pscustomobject]@{ topic = $Arguments[2]; summary = "body-$($Arguments[2])" } | ConvertTo-Json }
+} 3>$null)
+if ($badJson.Count -ne 2) { throw "recap ICM recall must continue past an unparseable topic, got $($badJson.Count) results for 2 topics" }
+$badJsonBad = @($badJson | Where-Object { $_.Topic -eq 'context-malformed' })
+$badJsonAfter = @($badJson | Where-Object { $_.Topic -eq 'decisions-ok' })
+if ($badJsonBad.Count -ne 1 -or -not $badJsonBad[0].Failed -or $badJsonBad[0].Bodies.Count -ne 0 -or -not $badJsonBad[0].Error) {
+    throw 'an unparseable ICM response must arrive as an explicit empty Failed result, not be dropped or faked'
+}
+if ($badJsonAfter.Count -ne 1 -or $badJsonAfter[0].Failed -or $badJsonAfter[0].Bodies.Count -ne 1) {
+    throw 'recap ICM recall stopped the loop at the unparseable topic'
+}
+
+$workingStateScript = Join-Path (Join-Path (Join-Path $PSScriptRoot '..') 'references') 'get-working-state.ps1'
 if (-not (Test-Path $workingStateScript -PathType Leaf)) {
     throw 'recap missing executable working-state helper'
 }

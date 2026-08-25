@@ -73,8 +73,8 @@ established the alert stays unmatched — unresolvable is not covered.
 
 ## Reading the output
 
-Each row is an open alert with no open Dependabot PR naming that package in that
-directory and ecosystem. Dependabot
+Each row is an alert in the selected `-AlertState` (`open` by default) with no open
+Dependabot PR naming that package in that directory and ecosystem. Dependabot
 may have decided no fix exists — or decided that **wrongly**. Those are
 indistinguishable from outside, which is why a human reads the row.
 
@@ -95,7 +95,7 @@ resolves it, whatever the log claims.
 
 | Flag | Purpose |
 |---|---|
-| `-Org` | Organisation(s) to enumerate. Default `<your-org>`. |
+| `-Org` | Organisation(s) or user(s) to enumerate. Default `<your-org>`. |
 | `-Repo` | Explicit `owner/repo`, repeatable; skips enumeration. |
 | `-GraceHours` | Age below which an alert is not reported. Default 48 — one weekly window plus queue time. |
 | `-AlertState` | `open` (default), or `fixed`/`dismissed`/`auto_dismissed` to backtest against history. |

@@ -28,6 +28,7 @@ Four classes, all matched against the public placeholder vocabulary in AGENTS.md
    ...) are unaffected.
 """
 
+import os
 import re
 import subprocess
 import sys
@@ -126,23 +127,32 @@ def scan(path, text):
 
 
 def main():
+    # `-z` terminates entries with NUL and disables path quoting, so a tracked name
+    # with a space, quote, or non-ASCII byte arrives verbatim instead of as a
+    # core.quotePath-escaped string that open() would then miss.
     listing = subprocess.run(
-        ["git", "ls-files"], check=True, capture_output=True, text=True
-    ).stdout.splitlines()
+        ["git", "ls-files", "-z"], check=True, capture_output=True
+    ).stdout.decode("utf-8", errors="replace").split("\0")
 
     problems = []
+    scanned = 0
     for path in listing:
+        if not path:
+            continue
+        if os.path.isdir(path):
+            continue  # a tracked submodule entry is a directory, not a greppable file
         with open(path, "rb") as handle:
             blob = handle.read()
         if b"\0" in blob:  # binary artefact; bytes are not greppable prose
             continue
+        scanned += 1
         problems.extend(scan(path, blob.decode("utf-8", errors="replace")))
 
     if problems:
         for problem in problems:
             print(problem)
         sys.exit(f"{len(problems)} private-token leak(s) in tracked files.")
-    print(f"No private tokens in {len(listing)} tracked files (dot-directories included).")
+    print(f"No private tokens in {scanned} tracked files (dot-directories included).")
 
 
 if __name__ == "__main__":

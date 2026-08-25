@@ -170,11 +170,17 @@ function Resolve-VaultTarget {
   # first-commit `0000000..x` diff is ignored — it resolves in every repo and proves nothing.
   # Seed each candidate root ITSELF when it holds a .git: in single-repo mode $ScanPath is the
   # repository, and enumerating only its children leaves a vault folder with no sha/name target.
+  # Deduplicate on the canonical full path: if -RepoRoots contains $ScanPath, or one root sits
+  # inside another, the same repo is enumerated TWICE as two DirectoryInfo objects - and the
+  # uniqueness checks below then read one repository as two matches, leaving a uniquely
+  # resolvable folder unresolved.
   $candidates = @(
-    foreach ($root in @(@($ScanPath) + @($RepoRoots) | Where-Object { $_ -and (Test-Path $_) })) {
-      if (Test-Path (Join-Path $root '.git')) { Get-Item -LiteralPath $root }
-      Get-ChildItem $root -Directory -ErrorAction SilentlyContinue | Where-Object { Test-Path (Join-Path $_.FullName '.git') }
-    }
+    @(
+      foreach ($root in @(@($ScanPath) + @($RepoRoots) | Where-Object { $_ -and (Test-Path $_) } | Select-Object -Unique)) {
+        if (Test-Path (Join-Path $root '.git')) { Get-Item -LiteralPath $root }
+        Get-ChildItem $root -Directory -ErrorAction SilentlyContinue | Where-Object { Test-Path (Join-Path $_.FullName '.git') }
+      }
+    ) | Group-Object { $_.FullName } | ForEach-Object { $_.Group[0] }
   )
   $scopeSha = $null
   foreach ($tx in $texts) {
@@ -517,18 +523,30 @@ $results = foreach ($r in $repos) {
 # Anything that will not resolve is emitted as unresolved=true, never as a silent frozen row.
 $scanned = @($results | ForEach-Object { $_.repo })
 if (Test-Path $VaultRoot) {
-  # Newest folder FIRST: the dedup below keeps the first-emitted row per repo+subsystem, and
-  # enumeration order is arbitrary — unsorted, a stale duplicate of a renamed repo could win
-  # over the folder carrying the newest review.
-  $vaultOnly = @(Get-ChildItem $VaultRoot -Directory | Where-Object { $scanned -notcontains $_.Name } | Sort-Object LastWriteTime -Descending)
+  # Newest REVIEW first, not newest folder mtime: the dedup below keeps the first-emitted row
+  # per repo+subsystem, and LastWriteTime is copy/mtime order, not review order — copying an old
+  # folder into the vault refreshes its mtime and would let a stale duplicate of a renamed repo
+  # win over the folder carrying the newest review. Order by the review's frontmatter date
+  # (then the sortable run-folder timestamp), file time only when a run declares no date.
+  $vaultOnly = @(
+    foreach ($v in (Get-ChildItem $VaultRoot -Directory | Where-Object { $scanned -notcontains $_.Name })) {
+      $vd = Get-VaultData -RepoName $v.Name -VaultRoot $VaultRoot
+      if (-not $vd.exists) { continue }
+      [pscustomobject]@{ Folder = $v; Data = $vd }
+    }
+  )
+  $vaultOnly = @($vaultOnly | Sort-Object -Descending `
+    @{ Expression = { if ($_.Data.date) { $_.Data.date } else { '' } } }, `
+    @{ Expression = { $_.Data.runName } }, `
+    @{ Expression = { $_.Folder.LastWriteTime } })
   # Track outside targets already emitted THIS pass, keyed on repo + subsystem, so two differently
   # named vault folders resolving to the same outside repo (a de-hyphen + a suffix match, or an old
   # and a current folder) do not both emit and double-count it. Distinct subsystems of one host
   # stay distinct (the key includes the sub-path).
   $resolvedThisPass = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-  $extra = @(foreach ($v in $vaultOnly) {
-    $vd = Get-VaultData -RepoName $v.Name -VaultRoot $VaultRoot
-    if (-not $vd.exists) { continue }
+  $extra = @(foreach ($entry in $vaultOnly) {
+    $v = $entry.Folder
+    $vd = $entry.Data
     $target = Resolve-VaultTarget -IndexPath $vd.indexPath -FolderName $v.Name -RepoRoots $RepoRoots -ScanPath $Path
     if ($target.resolved) {
       # A WHOLE-REPO resolution (no subsystemPath) onto an already-scanned in-path repo is a stale

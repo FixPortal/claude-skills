@@ -181,9 +181,14 @@ function Get-RepoList {
         # Derived live, never a hard-coded list: a repo added after this was written
         # would otherwise be silently uncovered, which is the same silent-absence
         # class of failure the script exists to catch.
+        # -Org is documented to accept an organisation OR a user, but the repos
+        # endpoint differs (`orgs/{o}/repos` vs `users/{o}/repos`) and the org one
+        # 404s on a user owner. Resolve the owner type first, then pick the route.
+        $ownerType = Invoke-Gh @('api', "users/$o", '-q', '.type')
+        $segment = if ($ownerType -eq 'Organization') { 'orgs' } else { 'users' }
         # Paginated via the REST API: `gh repo list --limit N` returns the first N
         # and exits 0, so every repo past the cap would be silently uncovered.
-        $names = Invoke-Gh @('api', '--paginate', "orgs/$o/repos?per_page=100",
+        $names = Invoke-Gh @('api', '--paginate', "$segment/$o/repos?per_page=100",
                              '-q', '.[] | select(.archived == false) | .full_name')
         if ($names) { $all += @($names) }
     }
@@ -417,7 +422,7 @@ if ($sorted.Count -eq 0) {
     $sorted | Format-Table -AutoSize `
         Repo, Alert, Package, Severity, AgeDays, Scope, FirstPatched | Out-String
     ''
-    'Each row is an open alert with no open Dependabot PR naming that package in that'
+    "Each row is a $AlertState alert with no open Dependabot PR naming that package in that"
     'directory/ecosystem. Dependabot may have decided no fix exists -- or decided that WRONGLY. Those are'
     'indistinguishable from outside, so read the update-job log by hand:'
     '  Insights > Dependency graph > Dependabot > the ecosystem row > Last checked'

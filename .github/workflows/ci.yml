@@ -58,17 +58,46 @@ jobs:
             $changed = @(& git diff --name-only "$env:BASE_SHA...HEAD")
             if ($LASTEXITCODE -eq 0 -and $changed.Count -gt 0 -and
                 -not ($changed | Where-Object { $_ -notlike 'skills/*' })) {
-              $touched = @($changed | ForEach-Object { ($_ -split '/')[1] } | Sort-Object -Unique)
-              $selected = @($verifiers | Where-Object {
-                  $rel = $_.FullName.Substring($PWD.Path.Length + 1) -replace '\\', '/'
-                  $touched -contains ($rel -split '/')[1]
-                })
-              if ($selected.Count -gt 0) {
-                Write-Host "Changed-path filter: $($selected.Count) of $($verifiers.Count) verifiers, for skills: $($touched -join ', ')"
-                $verifiers = $selected
+              # A file directly under skills/ (skills/foo.md) belongs to no skill;
+              # treating 'foo.md' as a skill name would silently exclude every verifier,
+              # so a loose file widens the run instead of narrowing it.
+              $touched = @()
+              $loose = $false
+              foreach ($path in $changed) {
+                $segments = $path -split '/'
+                if ($segments.Count -lt 3) { $loose = $true; break }
+                $touched += $segments[1]
+              }
+              if ($loose) {
+                Write-Host 'Changed files sit directly under skills/ and belong to no skill; running every verifier.'
               }
               else {
-                Write-Host 'Changed-path filter selected nothing; running every verifier instead.'
+                $touched = @($touched | Sort-Object -Unique)
+                # Verifiers that read sibling skills must also run when a sibling they
+                # read changes, or the sibling's edit merges without its contract being
+                # checked. Verifier path (repo-relative) -> the additional skills that
+                # trigger it. Add an entry when a verifier gains a cross-skill read.
+                $crossSkill = @{
+                  'skills/audit-ci/test/verify-blacksmith-guidance.ps1' = @('scaffold-ci')
+                  'skills/audit-tests/test/verify-policy.ps1' = @('scaffold-tests')
+                  'skills/review-sweep/test/verify-runtime-neutral.ps1' = @('adversarial-review')
+                  'skills/scaffold-ci/test/verify-security-visibility-policy.ps1' = @(
+                    'audit-ci', 'audit-github-estate', 'quality-gate-review', 'scaffold-dotnet')
+                }
+                $selected = @($verifiers | Where-Object {
+                    $rel = $_.FullName.Substring($PWD.Path.Length + 1) -replace '\\', '/'
+                    $extra = $crossSkill[$rel]
+                    ($touched -contains ($rel -split '/')[1]) -or
+                      ($null -ne $extra -and
+                       @($extra | Where-Object { $touched -contains $_ }).Count -gt 0)
+                  })
+                if ($selected.Count -gt 0) {
+                  Write-Host "Changed-path filter: $($selected.Count) of $($verifiers.Count) verifiers, for skills: $($touched -join ', ')"
+                  $verifiers = $selected
+                }
+                else {
+                  Write-Host 'Changed-path filter selected nothing; running every verifier instead.'
+                }
               }
             }
             else {
@@ -96,9 +125,10 @@ jobs:
               $threw = $_
             }
             if ($output) { Write-Host $output }
-            # A skip is not a pass: `SKIP: <reason>` lines are counted so a verifier that
-            # verified nothing stays visible in the summary.
-            $skipped += ([regex]::Matches("$output", '(?m)^SKIP:')).Count
+            # A skip is not a pass: a verifier that printed `SKIP: <reason>` verified
+            # nothing (or only partly), so it is counted as skipped — not passed — and
+            # stays visible in the summary.
+            $skipLines = ([regex]::Matches("$output", '(?m)^SKIP:')).Count
             $exitCode = $global:LASTEXITCODE
             if ($threw) {
               $failed += "$($verifier.FullName) (threw: $threw)"
@@ -106,15 +136,18 @@ jobs:
             elseif ($null -ne $exitCode -and $exitCode -ne 0) {
               $failed += "$($verifier.FullName) (exit code $exitCode)"
             }
+            elseif ($skipLines -gt 0) {
+              $skipped++
+            }
             else {
               $passed++
             }
           }
 
-          Write-Host "Verifier summary: $passed passed, $($failed.Count) failed, $skipped SKIP line(s), of $($verifiers.Count) run."
-          # The one assertion on skips, kept deliberately simple: a run in which every
-          # verifier skipped verified nothing, and nothing is not green.
-          if ($verifiers.Count -gt 0 -and $skipped -gt 0 -and $passed -eq 0 -and $failed.Count -eq 0) {
+          Write-Host "Verifier summary: $passed passed, $skipped skipped, $($failed.Count) failed, of $($verifiers.Count) run."
+          # Skipped verifiers never reach $passed, so an all-skip run has $passed -eq 0:
+          # a run that verified nothing is not green.
+          if ($verifiers.Count -gt 0 -and $passed -eq 0 -and $failed.Count -eq 0) {
             Write-Host 'Every verifier skipped — a run that verifies nothing is not a pass.'
             exit 1
           }

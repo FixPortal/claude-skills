@@ -79,6 +79,17 @@ if ($policy.high -contains '.github/workflows/**') {
 # guard delegates to a YAML parse. The checker must carry all three rules.
 $checkerPath = Join-Path $assets 'assert_workflow_hygiene.py'
 $checker = Get-Content $checkerPath -Raw
+# The checker ships in two places that must stay byte-identical: this asset, which a
+# scaffolded repo copies from, and the live copy gating THIS repository. A text check on
+# the asset alone certifies nothing about the copy that actually runs here - compare
+# bytes, so the two cannot drift apart silently.
+$liveCheckerPath = Join-Path $root '..' '..' '.github' 'scripts' 'assert_workflow_hygiene.py'
+if (-not (Test-Path -LiteralPath $liveCheckerPath -PathType Leaf)) {
+    throw 'live hygiene checker missing at .github/scripts/assert_workflow_hygiene.py; the asset has no live copy to stay in parity with'
+}
+if ((Get-FileHash $checkerPath).Hash -ne (Get-FileHash $liveCheckerPath).Hash) {
+    throw 'assets/assert_workflow_hygiene.py and .github/scripts/assert_workflow_hygiene.py have drifted; edit both together'
+}
 foreach ($assertion in 'SHA_LEN = 40', 'pull_request_target', 'write-all') {
     if ($checker -notmatch [regex]::Escape($assertion)) {
         throw "the shipped hygiene checker has lost the assertion that replaced the high glob: $assertion"
@@ -173,6 +184,39 @@ $fixtures = @(
             '    steps:'
             '      - uses:'
             '          third/party@v1'
+        ) -join "`n"
+    },
+    @{
+        # `on:` spelled as a YAML MAPPING: the trigger rule is otherwise only
+        # string-asserted against the checker's source, while the two rules above
+        # already prove themselves against the shipped checker. YAML 1.1 reads the
+        # bare key as boolean True, so this also exercises the True-key lookup.
+        Name     = 'mapping-style pull_request_target fails'
+        WantExit = 1
+        Workflow = @(
+            'name: bad'
+            'on:'
+            '  pull_request_target:'
+            '    branches: [main]'
+            'jobs:'
+            '  build:'
+            '    runs-on: ubuntu-latest'
+            '    steps: []'
+        ) -join "`n"
+    },
+    @{
+        # The first-party exemption is the vN major tag, not any ref: a branch ref is
+        # mutable and must fail the same way an unpinned third-party action does.
+        Name     = 'first-party branch ref fails'
+        WantExit = 1
+        Workflow = @(
+            'name: bad'
+            'on: [push]'
+            'jobs:'
+            '  build:'
+            '    runs-on: ubuntu-latest'
+            '    steps:'
+            '      - uses: actions/checkout@main'
         ) -join "`n"
     }
 )

@@ -204,7 +204,15 @@ function Get-ProjectDocuments {
         try { [xml] $xml = Get-Content -LiteralPath $file.FullName -Raw }
         catch {
             if ($null -ne $ParseErrors) {
-                $ParseErrors.Add("$([IO.Path]::GetRelativePath($Repo, $file.FullName)): $($_.Exception.Message)")
+                # The exception message can embed the ABSOLUTE file path (a drive-root
+                # user-profile path down to the project file), and ParseErrors is
+                # serialised into the emitted JSON -- leaking machine-local paths into
+                # a report that travels.
+                # Record the repo-relative path and strip the repo-root prefix from the
+                # message, keeping the failure kind without the filesystem layout.
+                $relative = [IO.Path]::GetRelativePath($Repo, $file.FullName)
+                $message = $_.Exception.Message -replace [regex]::Escape($Repo), '<repo>'
+                $ParseErrors.Add("${relative}: $message")
             }
             continue
         }
@@ -303,11 +311,17 @@ function Get-BundledAnalyzers {
 }
 
 function Get-GitStatus {
+    <# Returns $null on a failed capture, a result object on success. The object wrapper is
+       load-bearing: a CLEAN repo yields zero status lines, and `return @($status)` on an
+       empty result unrolls to nothing on the pipeline -- indistinguishable from the $null
+       failure return, so every clean repo reported GitStatusFailed and Mutated=$null.
+       An explicit Ok flag keeps "read successfully, nothing to report" apart from
+       "could not be read". #>
     param([string] $Repo)
     try {
         $status = & git -C $Repo status --porcelain 2>$null
         if ($LASTEXITCODE -ne 0) { return $null }
-        return @($status)
+        return [pscustomobject]@{ Ok = $true; Lines = @($status) }
     }
     catch { return $null }
 }
@@ -381,10 +395,10 @@ function Get-RepoInventory {
         AnalyzerPackages    = $analyzerish
         BundledAnalyzers    = $bundled
         AllPackageRefs      = $refs
-        GitStatusBefore     = $before
-        GitStatusAfter      = $after
+        GitStatusBefore     = if ($before) { @($before.Lines) } else { $null }
+        GitStatusAfter      = if ($after) { @($after.Lines) } else { $null }
         GitStatusFailed     = $gitStatusFailed
-        Mutated             = if ($gitStatusFailed) { $null } else { (($before -join "`n") -ne ($after -join "`n")) }
+        Mutated             = if ($gitStatusFailed) { $null } else { (($before.Lines -join "`n") -ne ($after.Lines -join "`n")) }
         # Non-empty means a project file could not be parsed; its package references and
         # policy properties are UNKNOWN, not absent. Treat like UnreadablePaths.
         ParseErrors         = @($parseErrors)

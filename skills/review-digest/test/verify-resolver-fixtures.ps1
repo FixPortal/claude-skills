@@ -198,7 +198,14 @@ try {
     # repositories would enter the SHA and name-search candidate lists and the
     # zz-fixture-unresolvable assertions would depend on estate contents rather than on the
     # fixture. Pinning it is what makes "hermetic" true rather than merely intended.
-    & pwsh -NoProfile -File $script -Path $scanRoot -OutFile $fixtureOut -VaultRoot $fixtureVault -RepoRoots $fixtureRepos 2>$null
+    # The roots DELIBERATELY overlap: $fixtureRepos is passed twice and $scanRoot duplicates
+    # -Path. Without candidate deduplication the sha and name searches see one repo as two
+    # matches, and the quoted-scope fixture below reports ambiguous instead of resolving.
+    # -Command, not -File: under -File every element after `-RepoRoots <first>` binds
+    # POSITIONALLY (and collect.ps1 has no positional parameters), so a multi-root argument
+    # fails to bind at all.
+    $repoRootsArg = (@($fixtureRepos, $scanRoot, $fixtureRepos) | ForEach-Object { "'$_'" }) -join ','
+    & pwsh -NoProfile -Command "& '$script' -Path '$scanRoot' -OutFile '$fixtureOut' -VaultRoot '$fixtureVault' -RepoRoots $repoRootsArg" 2>$null
     if ($LASTEXITCODE -ne 0) { throw "collect.ps1 exited $LASTEXITCODE on the fixture vault" }
     $fx = Get-Content $fixtureOut -Raw | ConvertFrom-Json
 

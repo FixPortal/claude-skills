@@ -35,7 +35,7 @@ $parseErrors = $null
 $ast = [System.Management.Automation.Language.Parser]::ParseFile($src, [ref]$null, [ref]$parseErrors)
 if ($parseErrors) { throw "reconcile.ps1 does not parse: $($parseErrors[0].Message)" }
 foreach ($fn in @('Test-DependabotPrCoversPackage', 'ConvertFrom-PrListJson', 'Get-Prop',
-                  'Get-AlertTarget', 'Test-DependabotPrTargetsAlert')) {
+                  'Get-AlertTarget', 'Test-DependabotPrTargetsAlert', 'Get-RepoList')) {
     $def = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $fn }, $true)
     if (-not $def) {
         throw "Could not extract $fn from reconcile.ps1 - was it renamed?"
@@ -162,6 +162,24 @@ Assert-PrList -Raw '[]'            -ExpectNull $false -Label 'a genuine empty ar
 Assert-PrList -Raw '[{"number":1,"body":"Bumps [x](u) from 1 to 2."}]' -ExpectNull $false `
     -Label 'a populated array is readable'
 
+# --- multi-page gh output shape ----------------------------------------------
+# CodeRabbit claimed `gh api --paginate` emits each page as a SEPARATE JSON document,
+# so without --slurp ConvertFrom-Json would fail on any multi-page response. Settled
+# by live probe (gh 2.87.3, 2026-08-25): REST array pages are MERGED into ONE array
+# document -- 90 PRs fetched at per_page=1 arrived as a single 90-element array that
+# parses cleanly. The danger it alleged (a multi-page repo silently reading as empty
+# or unreadable) therefore does not exist on current gh. Pin the shape gh actually
+# emits -- one compact array spanning what were separate pages -- so a gh regression
+# to separate documents fails loudly here instead of silently in the sweep.
+$mergedPages = '[{"number":1,"body":"Bumps [a](u) from 1 to 2."},{"number":2,"body":"Bumps [b](u) from 3 to 4."}]'
+$pageSet = ConvertFrom-PrListJson -Raw $mergedPages
+if ($null -ne $pageSet -and @($pageSet).Count -eq 2) { ok 'a merged multi-page array parses as every page' }
+else { bad 'a merged multi-page array parses as every page' }
+# And if gh ever DID emit separate documents, the safe direction is UNREADABLE
+# (skip the repo), never a partial or empty read: assert that shape is not parsed.
+Assert-PrList -Raw ("[{`"number`":1}]" + "`n" + '[{"number":2}]') -ExpectNull $true `
+    -Label 'separate JSON documents per page would be UNREADABLE, never a partial read'
+
 # And the readable-empty case must survive as an enumerable, or a repo with alerts and
 # genuinely no Dependabot PRs would crash rather than report.
 $emptySet = ConvertFrom-PrListJson -Raw '[]'
@@ -245,6 +263,36 @@ if ($null -eq (Get-AlertTarget -Alert ('{"dependency":{"package":{"ecosystem":"n
 } else {
     bad 'an alert without a manifest path has no establishable target'
 }
+
+# --- owner-type routing in Get-RepoList ----------------------------------------
+# -Org is documented to accept an organisation OR a user, but `orgs/{o}/repos` 404s on
+# a user owner. Get-RepoList must resolve the owner type first and pick the endpoint.
+# Invoke-Gh is stubbed so the routing is exercised offline; the stub records the args.
+$script:ghCalls = [System.Collections.Generic.List[object]]::new()
+function Invoke-Gh {
+    param([Parameter(Mandatory)][string[]]$Arguments, [switch]$AllowFailure)
+    $script:ghCalls.Add(@($Arguments))
+    if ($Arguments -contains '--paginate') { return @('acme/widget') }
+    return 'Organization'
+}
+$null = @(Get-RepoList -Orgs @('acme') -Explicit $null)
+$paginated = @($script:ghCalls | Where-Object { $_ -contains '--paginate' })
+if ($paginated.Count -eq 1 -and ($paginated[0] -join ' ') -match '^api --paginate orgs/acme/repos\?per_page=100') {
+    ok 'an Organization owner routes to orgs/{o}/repos'
+} else { bad "an Organization owner routes to orgs/{o}/repos (got '$($paginated | ForEach-Object { $_ -join ' ' })')" }
+
+$script:ghCalls.Clear()
+function Invoke-Gh {
+    param([Parameter(Mandatory)][string[]]$Arguments, [switch]$AllowFailure)
+    $script:ghCalls.Add(@($Arguments))
+    if ($Arguments -contains '--paginate') { return @('someone/widget') }
+    return 'User'
+}
+$null = @(Get-RepoList -Orgs @('someone') -Explicit $null)
+$paginated = @($script:ghCalls | Where-Object { $_ -contains '--paginate' })
+if ($paginated.Count -eq 1 -and ($paginated[0] -join ' ') -match '^api --paginate users/someone/repos\?per_page=100') {
+    ok 'a User owner routes to users/{o}/repos, not the 404ing orgs endpoint'
+} else { bad "a User owner routes to users/{o}/repos, not the 404ing orgs endpoint (got '$($paginated | ForEach-Object { $_ -join ' ' })')" }
 
 # --- red check --------------------------------------------------------------
 # A suite that cannot fail is not a suite. This asserts a deliberately false

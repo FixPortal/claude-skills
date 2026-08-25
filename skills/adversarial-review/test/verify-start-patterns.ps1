@@ -50,6 +50,7 @@ Check 'p1' $p1 '### Missing JSON serialization metadata' $true
 Check 'p1' $p1 '  ### Indented heading' $true
 Check 'p1' $p1 '- ### Heading in a list item' $true
 Check 'p1' $p1 '#### Deeper heading' $true
+Check 'p1' $p1 '**###** Emphasised heading' $true
 Check 'p1' $p1 'I will now review the diff.' $false
 Check 'p1' $p1 'Here are my findings:' $false
 
@@ -70,6 +71,11 @@ Check 'p1-admission' $p1Admission '- **Severity:** High' $true
 Check 'p1-admission' $p1Admission '### No substantive defects' $true
 Check 'p1-admission' $p1Admission ("### Analysis`n`nSome prose without any structured field.") $false
 Check 'p1-admission' $p1Admission 'I will now review the diff.' $false
+# The clean sentinel must be the ENTIRE reply: a sentinel line plus narration (or
+# malformed findings riding under it) is not participation-with-zero-findings and
+# must not count toward vendor diversity.
+Check 'p1-admission' $p1Admission ("### No substantive defects`n`nSome extra narration.") $false
+Check 'p1-admission' $p1Admission ("### No substantive defects`n- **Severity:** High") $true
 
 # --- Phase 2: per-finding verdicts, however the reviewer emphasises them ------
 $p2Verdict = Get-SourcePattern '$p2VerdictPattern = '
@@ -101,15 +107,25 @@ Check 'p2' $p2 'FIXME: this is prose' $false
 
 # --- Phase 2 admission: at least one valid F# verdict --------------------------
 # The negative half of the '### Verdicts' pin: with findings on the table, a heading alone must
-# NOT admit -- one valid F# verdict is required before the reply counts toward minVendors.
-$p2Admission = "(?m)$p2Verdict"
-if ($source -notmatch [regex]::Escape('$p2Admission = "(?m)$p2VerdictPattern"')) {
-    $failures += 'the Phase-2 admission pattern is not the verdict pattern; a heading-plus-prose reply would count as a vendor.'
+# NOT admit -- one valid F# verdict is required before the reply counts toward minVendors. And
+# an F-id followed by ARBITRARY text is no more a verdict than prose is: admission keys on the
+# verdict LINE (F-id + a contract keyword), built from the same source variables the driver uses.
+$p2VerdictKeyword = Get-SourcePattern '$p2VerdictKeyword = '
+$p2VerdictLineAssignment = [regex]::Match($source, '\$p2VerdictLine = "(?<p>.+?)"').Groups['p'].Value
+if (-not $p2VerdictLineAssignment) { throw 'could not find the $p2VerdictLine assignment' }
+$p2VerdictLine = $p2VerdictLineAssignment.Replace('$p2VerdictPattern', $p2Verdict).Replace('$p2VerdictKeyword', $p2VerdictKeyword)
+$p2Admission = "(?im)$p2VerdictLine"
+if ($source -notmatch [regex]::Escape('$p2Admission = "(?im)$p2VerdictLine"')) {
+    $failures += 'the Phase-2 admission pattern is not the verdict-line pattern; a heading-plus-prose reply (or an F-id with arbitrary text) would count as a vendor.'
 }
 Check 'p2-admission' $p2Admission '### Verdicts' $false
 Check 'p2-admission' $p2Admission ("### Analysis`n`nOverall the change looks reasonable.") $false
 Check 'p2-admission' $p2Admission '**F1: FALSE POSITIVE**' $true
-Check 'p2-admission' $p2Admission 'F3. disagree' $true
+Check 'p2-admission' $p2Admission 'F1: AGREE - real' $true
+Check 'p2-admission' $p2Admission 'F9) needs evidence' $true
+# 'disagree' and free text after the F-id are not contract verdicts.
+Check 'p2-admission' $p2Admission 'F3. disagree' $false
+Check 'p2-admission' $p2Admission 'F1: arbitrary text with no verdict' $false
 
 # --- The pooler: divergent admitted forms and fenced code blocks ---------------
 # Feed the DIVERGENT inputs through the actual pooler, not just the admission regex.
@@ -127,13 +143,17 @@ Some narration before the first finding (dropped).
   ### Indented heading
 - **Severity:** Low
 - **Issue:** second
+
+**###** Emphasised heading
+- **Severity:** Medium
+- **Issue:** third
 '@
 # Assign BEFORE wrapping: @(Split-FindingBlocks ...) captures the returned array as
 # ONE element instead of its blocks (the single-array pipeline quirk).
 $splitBlocks = Split-FindingBlocks $poolInput
 $blocks = @($splitBlocks)
-if ($blocks.Count -ne 2) {
-    $failures += "pooler split the divergent input into $($blocks.Count) block(s), expected 2 (fence state ignored, or '#### '/'  ### ' forms not recognised)"
+if ($blocks.Count -ne 3) {
+    $failures += "pooler split the divergent input into $($blocks.Count) block(s), expected 3 (fence state ignored, or '#### '/'  ### '/'**###**' forms not recognised)"
 } else {
     if (-not $blocks[0].StartsWith('### Deeper heading')) {
         $failures += "pooler did not normalise '#### Deeper heading' to canonical '### ': got '$($blocks[0].Split([char]10)[0])'"
@@ -143,6 +163,9 @@ if ($blocks.Count -ne 2) {
     }
     if (-not $blocks[1].StartsWith('### Indented heading')) {
         $failures += "pooler did not normalise '  ### Indented heading' to canonical '### ': got '$($blocks[1].Split([char]10)[0])'"
+    }
+    if (-not $blocks[2].StartsWith('### Emphasised heading')) {
+        $failures += "pooler did not normalise '**###** Emphasised heading' to canonical '### ': got '$($blocks[2].Split([char]10)[0])'"
     }
 }
 # The clean sentinel must never pool as a finding.

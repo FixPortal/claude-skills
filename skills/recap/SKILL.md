@@ -34,7 +34,7 @@ if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($rootRaw)) { throw 'rec
 $repoRoot = [IO.Path]::GetFullPath($rootRaw.Trim())
 ```
 
-Resolve the shared recipe with `$recipePath = (Resolve-Path (Join-Path $PSScriptRoot '..' 'close' 'references' 'topic-key.ps1')).Path`, and dot-source it with `. $recipePath`. It provides `Get-RepositoryTopicInfo` and `Get-RemoteRepositoryName`; call each once, in the block below.
+Resolve the shared recipe with `$recipePath = (Resolve-Path (Join-Path (Join-Path (Join-Path (Join-Path $PSScriptRoot '..') 'close') 'references') 'topic-key.ps1')).Path`, and dot-source it with `. $recipePath`. It provides `Get-RepositoryTopicInfo` and `Get-RemoteRepositoryName`; call each once, in the block below.
 Assign `$repoDisplayName = $topicInfo.DisplayName`,
 `$repoTopicKey = $topicInfo.TopicKey`,
 `$contextTopic = $topicInfo.ContextTopic`, and
