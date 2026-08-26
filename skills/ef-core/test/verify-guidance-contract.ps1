@@ -1,5 +1,7 @@
 $ErrorActionPreference = 'Stop'
-$skill = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot '..' 'SKILL.md')
+$root = Join-Path $PSScriptRoot '..'
+$skill = Get-Content -Raw -LiteralPath (Join-Path $root 'SKILL.md')
+$contract = $skill + "`n" + (Get-Content -Raw -LiteralPath (Join-Path $root 'references/nodatime-sql-server.md'))
 
 $required = @(
     'sealed class LocalDateToDateTimeConverter',
@@ -16,7 +18,7 @@ $forbidden = @(
 )
 
 foreach ($value in $required) {
-    if (-not $skill.Contains($value)) { throw "Missing EF Core contract: $value" }
+    if (-not $contract.Contains($value)) { throw "Missing EF Core contract: $value" }
 }
 foreach ($value in $forbidden) {
     if ($skill.Contains($value)) { throw "Stale EF Core contract: $value" }
@@ -55,7 +57,7 @@ foreach ($mutation in $primaryConstructorMutations) {
     }
 }
 
-if (@(Get-UnguardedPrimaryConstructorDeclarations $skill).Count -gt 0) {
+if (@(Get-UnguardedPrimaryConstructorDeclarations $contract).Count -gt 0) {
     throw 'EF Core examples must not use unguarded C# 12 primary constructors.'
 }
 

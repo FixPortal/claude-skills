@@ -1,4 +1,5 @@
 $ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
 $text = Get-Content (Join-Path $PSScriptRoot '..' 'SKILL.md') -Raw
 
 # ~/.codex/AGENTS.md and ~/.kimi-code/AGENTS.md both state the worktree directory
@@ -35,21 +36,70 @@ if ($text -notmatch '(?m)^description:.*Do not use for read-only review, review-
 }
 
 $normalized = $text -replace '\s+', ' '
-$fetch = $normalized.IndexOf('`git fetch --prune`', [System.StringComparison]::Ordinal)
-$batch = $normalized.IndexOf('select the next batch number', [System.StringComparison]::Ordinal)
-$origin = $normalized.IndexOf('create the branch from `origin/main`', [System.StringComparison]::Ordinal)
-if ($fetch -lt 0 -or $batch -lt 0 -or $origin -lt 0 -or $fetch -gt $batch -or $fetch -gt $origin) {
-    throw 'SKILL.md must require discrete git fetch --prune before batch selection and origin/main branching'
+foreach ($needle in 'origin/HEAD',
+                     'git symbolic-ref --quiet --short refs/remotes/origin/HEAD',
+                     'git ls-remote --symref origin HEAD',
+                     'git rev-parse --verify',
+                     '<mainline-ref>') {
+    if ($normalized -notmatch [regex]::Escape($needle)) {
+        throw "SKILL.md missing default-branch resolution contract: $needle"
+    }
+}
+if ($text -match 'origin/main') {
+    throw 'SKILL.md must not hard-code origin/main as the project mainline'
 }
 
-$absentWorktree = [regex]::Match($normalized, 'If the review worktree is absent.*?verified primary checkout.*?`git fetch --prune`.*?select the next batch number.*?`git worktree add`.*?`origin/main`')
+$fetch = $normalized.IndexOf('`git fetch --prune`', [System.StringComparison]::Ordinal)
+$resolve = $normalized.IndexOf('origin/HEAD', [System.StringComparison]::Ordinal)
+$batch = $normalized.IndexOf('select the next batch number', [System.StringComparison]::Ordinal)
+if ($fetch -lt 0 -or $resolve -lt 0 -or $batch -lt 0 -or $fetch -gt $resolve -or $resolve -gt $batch) {
+    throw 'SKILL.md must fetch and resolve the verified mainline before batch selection'
+}
+
+$absentWorktree = [regex]::Match($normalized, 'If the review worktree is absent.*?verified primary checkout.*?`git fetch --prune`.*?origin/HEAD.*?select the next batch number.*?`git worktree add`.*?<mainline-ref>')
 if (-not $absentWorktree.Success) {
-    throw 'SKILL.md must recreate an absent review worktree from refreshed origin/main after fetching in the verified primary checkout'
+    throw 'SKILL.md must recreate an absent review worktree from the refreshed, verified remote mainline'
 }
 
 $existingWorktree = [regex]::Match($normalized, 'If the review worktree already exists.*?`git fetch --prune`.*?before any new branch choice')
 if (-not $existingWorktree.Success) {
     throw 'SKILL.md must fetch inside an existing review worktree before branch selection'
+}
+
+# Exercise both origin/HEAD and the advertised-HEAD fallback against a repository whose
+# default branch is deliberately not main.
+$fixtureRoot = Join-Path ([IO.Path]::GetTempPath()) "review-worktree-$([guid]::NewGuid())"
+try {
+    $source = Join-Path $fixtureRoot 'source'
+    $remote = Join-Path $fixtureRoot 'remote.git'
+    $clone = Join-Path $fixtureRoot 'clone'
+    New-Item -ItemType Directory -Path $source -Force | Out-Null
+    git -C $source init --initial-branch=trunk --quiet
+    git -C $source config core.autocrlf false
+    git -C $source config core.safecrlf false
+    [IO.File]::WriteAllText((Join-Path $source 'README.md'), "fixture`n")
+    git -C $source add README.md
+    git -C $source -c user.name=fixture -c user.email=fixture@example.invalid commit --quiet -m fixture
+    git -c core.autocrlf=false clone --quiet --bare $source $remote
+    git -c core.autocrlf=false clone --quiet $remote $clone
+
+    $mainline = (git -C $clone symbolic-ref --quiet --short refs/remotes/origin/HEAD).Trim()
+    if ($mainline -cne 'origin/trunk') { throw "origin/HEAD resolved '$mainline', expected origin/trunk" }
+    git -C $clone rev-parse --verify --quiet "$mainline^{commit}" | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw 'Resolved origin/HEAD does not name a fetched commit' }
+
+    git -C $clone symbolic-ref --delete refs/remotes/origin/HEAD
+    $advertised = git -C $clone ls-remote --symref origin HEAD
+    $match = [regex]::Match(($advertised -join "`n"), '(?m)^ref:\s+refs/heads/(?<branch>\S+)\s+HEAD$')
+    if (-not $match.Success) { throw 'Fallback could not resolve the remote advertised HEAD' }
+    $mainline = "origin/$($match.Groups['branch'].Value)"
+    git -C $clone rev-parse --verify --quiet "$mainline^{commit}" | Out-Null
+    if ($LASTEXITCODE -ne 0 -or $mainline -cne 'origin/trunk') {
+        throw 'Advertised-HEAD fallback did not resolve and verify origin/trunk'
+    }
+}
+finally {
+    if (Test-Path -LiteralPath $fixtureRoot) { Remove-Item -LiteralPath $fixtureRoot -Recurse -Force }
 }
 
 'review-worktree-pass worktree path OK'

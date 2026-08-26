@@ -77,7 +77,7 @@ clock in domain code.
   types. Prefer these converters over a community package unless repetition is
   demonstrably costly.
 
-### Per-entity SQL Server mapping
+### SQL Server mapping
 
 ```csharp
 using Microsoft.EntityFrameworkCore;
@@ -108,53 +108,5 @@ public sealed class TradeConfiguration : IEntityTypeConfiguration<Trade>
 }
 ```
 
-### Central SQL Server conventions
-
-```csharp
-using Microsoft.EntityFrameworkCore;
-using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
-using NodaTime;
-
-public sealed class AppDbContext : DbContext
-{
-    public AppDbContext(DbContextOptions<AppDbContext> options)
-        : base(options)
-    {
-    }
-
-    protected override void ConfigureConventions(
-        ModelConfigurationBuilder configurationBuilder)
-    {
-        configurationBuilder.Properties<LocalDate>()
-            .HaveConversion<LocalDateToDateTimeConverter>()
-            .HaveColumnType("date");
-
-        configurationBuilder.Properties<Instant>()
-            .HaveConversion<InstantToDateTimeConverter>()
-            .HaveColumnType("datetime2");
-    }
-}
-
-public sealed class LocalDateToDateTimeConverter
-    : ValueConverter<LocalDate, DateTime>
-{
-    public LocalDateToDateTimeConverter()
-        : base(
-            value => value.ToDateTimeUnspecified(),
-            value => LocalDate.FromDateTime(value))
-    {
-    }
-}
-
-public sealed class InstantToDateTimeConverter
-    : ValueConverter<Instant, DateTime>
-{
-    public InstantToDateTimeConverter()
-        : base(
-            value => value.ToDateTimeUtc(),
-            value => Instant.FromDateTimeUtc(
-                DateTime.SpecifyKind(value, DateTimeKind.Utc)))
-    {
-    }
-}
-```
+For model-wide conventions and reusable converter classes, use
+[the central-conventions alternative](references/nodatime-sql-server.md).

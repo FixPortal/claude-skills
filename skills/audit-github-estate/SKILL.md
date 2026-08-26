@@ -1,6 +1,6 @@
 ---
 name: audit-github-estate
-description: Audits GitHub quality and security across an organization or supplied repository estate, including Code Quality, CodeQL/code scanning, Dependabot, secret scanning, repository security advisories, Actions evidence, remediation, and post-merge verification. Triggers include /audit-github-estate, "audit the GitHub estate", "GitHub estate audit", and "audit GitHub security across these repositories".
+description: Use when auditing GitHub quality and security across an organization or supplied repository estate, including Code Quality, CodeQL/code scanning, Dependabot, secret scanning, repository security advisories, Actions evidence, remediation, and post-merge verification.
 ---
 
 # Audit GitHub Estate
@@ -19,6 +19,8 @@ empty PR for those. Stop at a green PR unless the user separately authorizes mer
 
 Before auditing or changing GitHub Actions or CI configuration, read the canonical
 `~/.agents/notes/deploy-and-ci-traps.md`; use its current guidance instead of memory.
+Read and follow [the GitHub evidence contract](references/github-evidence.md) for endpoint,
+visibility, field-name, exit-status, and capability-probe rules.
 
 ## Estate policy
 
@@ -35,55 +37,18 @@ Derive identity and policy inputs live for each repository with
 from an account allowlist, a local remote, or a previous run. Owner type determines the
 public secret-alert inventory route, while visibility determines paid-product policy.
 
-### Paid security control readback
+Apply the paid-security target mapping and endpoint applicability in
+`references/github-evidence.md`; a disabled parent never proves its children are
+disabled.
 
-GitHub's current repository API and code-security-configuration API use different
-names for some controls. Enumerate both surfaces; a disabled parent never proves its
-children are disabled.
-
-| Effective repository field | Configuration counterpart | Public | Private/internal |
-|---|---|---|---|
-| `code_security` | `code_security` | `enabled` | `disabled` |
-| `secret_scanning` | `secret_scanning` | `enabled` | `disabled` |
-| `secret_scanning_push_protection` | `secret_scanning_push_protection` | `enabled` | `disabled` |
-| `secret_scanning_ai_detection` | `secret_scanning_generic_secrets` | `enabled` | `disabled` |
-| `secret_scanning_non_provider_patterns` | `secret_scanning_non_provider_patterns` | `enabled` | `disabled` |
-| `secret_scanning_validity_checks` | `secret_scanning_validity_checks` | `enabled` | `disabled` |
-| `secret_scanning_delegated_alert_dismissal` | `secret_scanning_delegated_alert_dismissal` | `disabled` | `disabled` |
-| `secret_scanning_delegated_bypass` | `secret_scanning_delegated_bypass` | `disabled` | `disabled` |
-
-The named public configuration also has controls without a repository-field mapping:
-
-| Configuration field | Public configuration | Private/internal |
-|---|---|---|
-| `secret_protection` | `enabled` | `not attached` |
-| `code_scanning_default_setup` | `enabled` | `not attached` |
-| `code_scanning_delegated_alert_dismissal` | `disabled` | `not attached` |
-| `secret_scanning_extended_metadata` | `enabled` | `not attached` |
-| `private_vulnerability_reporting` | `enabled` | `not attached` |
-
-Also inventory the legacy aggregate `advanced_security`. The configuration's
-`secret_protection` and repository's
-`secret_scanning` children are separate evidence. Do not use `advanced_security` as a
-substitute for the individual `code_security` and `secret_protection` fields: GitHub
-documents it as the legacy bundled-product control and says it cannot be used for
-standalone products. The repository API calls generic-secret coverage
-`secret_scanning_ai_detection`; configurations call it
-`secret_scanning_generic_secrets`.
-
-After every approved repository `PATCH`, issue a fresh
-`GET /repos/{owner}/{repo}` and compare every effective control in the table with the
-visibility target. Then retrieve `GET /repos/{owner}/{repo}/code-security-configuration`:
-public repositories must show the resolved public configuration attached; private or
-internal repositories must return no attached configuration. Re-read the named public
-configuration and verify `code_security`, `code_scanning_default_setup`,
-`code_scanning_delegated_alert_dismissal`, `secret_protection`, `secret_scanning`,
-`secret_scanning_push_protection`, `secret_scanning_validity_checks`,
-`secret_scanning_non_provider_patterns`, `secret_scanning_generic_secrets`,
-`secret_scanning_delegated_alert_dismissal`, `secret_scanning_extended_metadata`,
-`secret_scanning_delegated_bypass`, and `private_vulnerability_reporting`. Check the exit
-status before decoding any `gh api` output. A missing field is `UNKNOWN`, never equivalent
-to `disabled`.
+After every approved repository `PATCH`, `GET /repos/{owner}/{repo}` again, then issue
+fresh attachment, configuration, default-setup, and product-specific reads for every
+applicable paid control. Check each `gh`
+exit status before decoding output, then compare the complementary evidence with the
+visibility targets above. Public repositories must show the resolved public configuration
+attached; private/internal repositories must show no attachment. Do not require a legacy
+or non-applicable field from an endpoint that omits it. Only missing evidence identified as
+applicable by `references/github-evidence.md` is `UNKNOWN`.
 
 ### Unsupported repository mutation
 
@@ -99,33 +64,16 @@ configuration IDs are not durable policy. Set the public configuration as the
 default for public repositories. No paid security configuration should be the
 default for, or attached to, private/internal repositories.
 
-Before changing any repository's Code Quality setup, establish the
-organization or enterprise **Repository access** selection, enforcement, and
-displayed billing impact. Record the current cost authorization. Treat any
-organization-level access or repository setup that enables Code Quality without
-explicit approval of the current charges as drift.
+Apply the Code Quality capability and UI-evidence rules in
+`references/github-evidence.md`. Read-only repository setup inspection remains allowed
+while organization access is unverified. Mutations and paid findings/analysis require a
+dated operator report of Repository access, enforcement, displayed price, and explicit
+approval; otherwise record the specified `UNVERIFIED` gap and continue every other
+surface.
 
-**That surface is UI-only: GitHub exposes no organization endpoint for it.** Code
-Quality is published at repository scope only (`code-quality/setup`,
-`code-quality/findings`). So "establish" means **ask the user** to read
-*Organization settings → Code security → Code Quality* and report the selection, the
-enforcement toggle, and the displayed figure; their answer, dated, is the evidence.
-
-Do not make a repository-level Code Quality change until that control and its approval
-are known. If the user has not answered, that is a **stated evidence gap**, not a
-blocker on the whole run: record `Code Quality org access: UNVERIFIED (UI-only,
-awaiting operator)`, skip only the Code Quality mutations and the paid-analysis
-queries, and complete every other surface. Read-only setup inspection
-(`GET /repos/{owner}/{repo}/code-quality/setup`) is still performed in this state, so
-every repository reports its effective `state` — otherwise a mandatory control would
-go unread while the audit presents as complete. A hard precondition with no way to
-discharge it would otherwise stall an estate audit indefinitely, or — worse — get
-silently assumed.
-The default compliant organization state is **No repositories** with **Enforce
-access** on. An approved paid exception uses **Selected repositories** containing
-exactly the approved repositories, also with enforcement on. Treat `Let repositories
-decide`, a broader selection, or enforcement off as drift unless the user explicitly
-approved that exact scope.
+Establish organization Repository access, enforcement, and billing before any Code Quality
+mutation. The default is **No repositories** with **Enforce access** on; an approved paid
+exception is **Selected repositories** containing exactly the approved repositories.
 
 Treat a private repository with Code Security, Code Quality, and Secret
 Protection disabled as **compliant by policy**, not disabled evidence, an
@@ -171,6 +119,8 @@ advisories are also distinct from Dependabot alerts.
 
 Inventory each repository before changing anything:
 
+- Code Quality repository setup through its read-only endpoint for every repository,
+  even while organization access remains unverified.
 - Code Quality findings and current default-branch analysis only for repositories
   where paid Code Quality is explicitly authorized and enabled.
 - CodeQL/code-scanning alerts, analyses, tools, and default setup only where
@@ -178,36 +128,25 @@ Inventory each repository before changing anything:
   policy.
 - Dependabot alerts, dependency graph, security updates, and updater runs.
   **Reconcile those alerts against open Dependabot PRs by invoking
-  `audit-dependabot-coverage`** rather than reimplementing it here. Invoke it with
-  `-GraceHours 0`: its default grace window would silently drop unmatched alerts
-  younger than it, and this phase must distinguish zero open items from pending
-  evidence — every unmatched alert enters the per-repository ledger itself. An open
-  alert that nothing is acting on is a finding in its own right, and it is invisible
-  to every configuration check: on 2026-08-08 a high-severity nanoid advisory on
+  `audit-dependabot-coverage/reconcile.ps1 -GraceHours 0`** rather than reimplementing it
+  here. Estate ledgers cannot hide younger unmatched alerts behind the standalone audit's
+  grace period. An open alert that
+  nothing is acting on is a finding in its own right, and it is invisible to every
+  configuration check: on 2026-08-08 a high-severity nanoid advisory on
   `your-repo` went four days with no PR because Dependabot reached a wrong
   verdict, while security updates were enabled, unpaused and correctly configured
   throughout. See `~/.agents/notes/npm-publishing-traps.md` trap 16.
-- Secret-scanning configuration only where enabled by estate policy. For a public
-  repository **owned by an organization**, inventory alerts through
-  `GET /orgs/{org}/secret-scanning/alerts`; the repository-level alert
-  list/get/update/location endpoints document `404: Repository is public`, so they are
-  not an inventory source. That org response is org-wide: **filter it by
-  `repository.full_name`** before writing any per-repository ledger, and state the
-  filter you applied — Phase 2 requires one ledger per repository and an unfiltered
-  response silently attributes every repo's alerts to whichever one you were writing up.
-- **A public repository owned by a USER has no alert inventory source at all.** GitHub
-  publishes no user-namespace equivalent of the org endpoint (`/users/{user}/…` does not
-  exist), and the repository-level endpoints `404` precisely because the repo is public.
-  Classify the owner live from `.owner.type`. Declare these repositories a **UI-only
-  evidence boundary** and report them as such — never as zero findings, and never as
-  "not applicable". Phase 2's own requirement to distinguish an empty queue from an
-  unavailable one cannot be met any other way.
+- Secret-scanning configuration only where enabled by estate policy. Capability-probe
+  the public repository alert endpoint first. Use a successful `200`; otherwise use the
+  organization endpoint when the owner is an organization and filter by exact
+  `repository.full_name`. Declare UI-only/UNKNOWN only after every available route fails.
 - Organization/public repository security advisories.
 - Latest default-branch Actions checks and security-product configuration.
 - Rulesets and branch protection as a separate control surface when in scope.
 
-For every policy-enabled current analysis, compare `headSha` with the current
-default-branch SHA. Distinguish zero open items from not applicable by policy,
+For every policy-enabled current analysis, compare its source-specific SHA with the live
+default-branch SHA: Code Scanning analyses expose `commit_sha`; Actions runs expose
+`head_sha`. Distinguish zero open items from not applicable by policy,
 inaccessible, stale, pending, failed, or unavailable evidence. Expected private
 Code Security and Code Quality disablement is not incomplete evidence.
 
@@ -236,12 +175,11 @@ and run.
 
 ## Phase 4: Remediate approved findings
 
-Public secret-scanning alerts are an exception to the generic API disposition
-sequence. Retain the organization alert response as inventory evidence, do not
-call the repository-level list/get/update/location endpoints, and do not attempt
-an API disposition: GitHub documents `404` for those endpoints when the
-repository is public. Report repository-level retrieval and update as a UI-only
-automation boundary, not as inaccessible evidence or a not-applicable surface.
+Public secret-scanning alerts follow the capability probe recorded during baseline. If
+the repository endpoint returned `200`, use its repository-level get/location/update
+routes normally. If only the organization inventory route worked, retain its filtered
+response and treat unavailable repository-level retrieval/update as a UI-only automation
+boundary. Never turn a failed route into an empty queue.
 
 Report that boundary as a **table**, not prose — anything the user must action by hand
 gets lost in a wall of text, and this set is by definition entirely hand-actioned:
@@ -300,8 +238,8 @@ products, submit an unchanged setup patch, or
 create a meaningless commit to provoke a scan. GitHub-generated default-setup
 workflows may not support manual dispatch or rerun.
 
-Require each relevant successful analysis `headSha` to equal the current
-default-branch SHA. Otherwise classify that surface as incomplete. Re-query
+Require each relevant successful Code Scanning analysis `commit_sha` and Actions run
+`head_sha` to equal the current default-branch SHA. Otherwise classify that surface as incomplete. Re-query
 every enabled surface and current default-branch check after scans settle.
 
 Classify each repository:

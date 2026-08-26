@@ -38,10 +38,11 @@ Copy and adapt shipped files from `assets/` and `templates/`; do not retype them
 - No-deploy workflows cancel superseded branch runs but not main or tags; deploy workflows use `cancel-in-progress: false`.
 - Backend CI is npm-free. Restore local tools and run `dotnet csharpier check .` before restore/build/test.
 - End-to-end, stress/load/soak, repeated concurrency, slow packaging, and compatibility matrices never run in the required PR lane.
-- `CI Gate` has `if: always()`, zero permissions, and needs every quality job. `Gate coverage` runs the shipped pure-stdlib Python asset; it has no PyYAML dependency.
-- `review-policy-guard.yml` verifies the policy is tracked and uses `git check-ignore --no-index`.
-- Secret gates pin the gitleaks install; sweeps use the reviewed TruffleHog detector allowlist.
-- Dependency manifests are not HIGH. Registry, SDK, analyzer, workflow, auth, migration, and review controls are.
+- `CI Gate` has `if: always()`, zero permissions, and needs every quality job. `Gate coverage` runs the shipped stdlib-only asset, which asserts the gate's own semantics.
+- `review-policy-guard.yml` verifies the policy is tracked, uses `git check-ignore --no-index`, and runs `assert_workflow_hygiene.py` — which parses workflows, never greps them.
+- Secret gates pin the gitleaks install and scan range *and* tree; sweeps use the TruffleHog detector allowlist.
+- Tag-fired publish/deploy asserts ancestry of the default branch.
+- Dependency manifests are not HIGH. Registry, SDK, analyzer, auth, migration, review controls, and the merge barrier are.
 
 ## Validation
 

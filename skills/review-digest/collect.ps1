@@ -40,7 +40,7 @@ if (-not $repos) { Write-Error "No git repos under $Path"; exit 3 }
 
 function Get-VaultData {
   param([string]$RepoName, [string]$VaultRoot)
-  $empty = [pscustomobject]@{ exists = $false; indexPath = $null; runName = $null; reviewers = @(); judge = $null; date = $null; reviewType = $null; tally = $null; reportFiles = @(); reviewTarget = $null; reviewScope = $null; isDocumentReview = $false; subsystemPath = $null }
+  $empty = [pscustomobject]@{ exists = $false; indexPath = $null; runName = $null; reviewers = @(); judge = $null; date = $null; reviewType = $null; tally = $null; reportFiles = @(); reviewTarget = $null; reviewScope = $null; isDocumentReview = $false; subsystemPath = $null; subsystemPaths = @() }
   $repoDir = Join-Path $VaultRoot $RepoName
   if (-not (Test-Path $repoDir)) { return $empty }
   # Each run is a timestamped subfolder holding _index.md. Pick the run with the newest frontmatter date (fallback: folder mtime).
@@ -104,14 +104,29 @@ function Get-VaultData {
   # `skip` - permanently, because the next sweep sees the same repo-wide boundary.
   # Preferred source is an explicit `subsystem:` key; failing that, an `audit -- <pathspec>`
   # target names its own scope.
-  $subsystemPath = $null
-  $sm2 = [regex]::Match($text, '(?im)^subsystem:\s*(.+)$')
-  if ($sm2.Success) { $subsystemPath = $sm2.Groups[1].Value.Trim().Trim('"', "'", '`') }
-  if (-not $subsystemPath -and $reviewTarget -match '(?i)^\s*audit\s+--\s+(.+?)\s*$') {
-    $subsystemPath = $Matches[1].Trim().Trim('"', "'", '`')
+  $subsystemPaths = @()
+  $sm2 = [regex]::Match($text, '(?im)^subsystem:[ \t]*(.*)$')
+  if ($sm2.Success) {
+    $inline = $sm2.Groups[1].Value.Trim()
+    if ($inline -match '^\[(.*)\]$') {
+      $subsystemPaths = @($Matches[1] -split ',' | ForEach-Object { $_.Trim().Trim('"', "'", '`') } | Where-Object { $_ })
+    } elseif ($inline) {
+      $subsystemPaths = @($inline.Trim('"', "'", '`'))
+    } else {
+      $tail = $text.Substring($sm2.Index + $sm2.Length)
+      foreach ($line in @($tail -split '\r?\n')) {
+        if (-not $line.Trim()) { continue }
+        if ($line -notmatch '^\s+-\s+(.+?)\s*$') { break }
+        $subsystemPaths += $Matches[1].Trim().Trim('"', "'", '`')
+      }
+    }
   }
+  if (-not $subsystemPaths.Count -and $reviewTarget -match '(?i)^\s*audit\s+--\s+(.+?)\s*$') {
+    $subsystemPaths = @($Matches[1].Trim().Trim('"', "'", '`'))
+  }
+  $subsystemPath = if ($subsystemPaths.Count -eq 1) { $subsystemPaths[0] } else { $null }
   $reports = @(Get-ChildItem $best.FullName -Filter 'report*.md' | Select-Object -ExpandProperty Name)
-  [pscustomobject]@{ exists = $true; indexPath = $idx; runName = $best.Name; reviewers = $reviewers; judge = $judge; date = $date; reviewType = $reviewType; tally = $tally; reportFiles = $reports; reviewTarget = $reviewTarget; reviewScope = $reviewScope; isDocumentReview = $isDocumentReview; subsystemPath = $subsystemPath }
+  [pscustomobject]@{ exists = $true; indexPath = $idx; runName = $best.Name; reviewers = $reviewers; judge = $judge; date = $date; reviewType = $reviewType; tally = $tally; reportFiles = $reports; reviewTarget = $reviewTarget; reviewScope = $reviewScope; isDocumentReview = $isDocumentReview; subsystemPath = $subsystemPath; subsystemPaths = @($subsystemPaths) }
 }
 
 # Resolve a vault folder to the code it actually reviewed, via the file:/// links its
@@ -215,7 +230,7 @@ function Resolve-VaultTarget {
   if ($want.Length -ge 4) {
     foreach ($mode in 'eq', 'suffix', 'contains') {
       # As with the sha stage above: collect every match and resolve only on a UNIQUE candidate.
-      # 'fix-portal' vs 'FixPortal' differ only by enumeration order, and silently taking the
+      # 'service-app' vs 'ServiceApp' differ only by enumeration order, and silently taking the
       # first is how a review gets credited to the wrong repo.
       $byName = @($candidates | Where-Object {
         $n = ($_.Name -replace '[^a-zA-Z0-9]', '').ToLowerInvariant()
@@ -290,34 +305,71 @@ function Get-SubsystemTarget {
   }
 }
 
+function Get-ValidatedSubsystemScope {
+  param([string]$RepoPath, [string[]]$Paths)
+  $paths = @($Paths | Where-Object { $_ })
+  if (-not $paths.Count) { return [pscustomobject]@{ paths = @(); validation = 'none' } }
+  foreach ($pathspec in $paths) {
+    $tracked = @(& git -C $RepoPath ls-files -- $pathspec 2>$null)
+    if ($LASTEXITCODE -ne 0 -or -not $tracked.Count) {
+      return [pscustomobject]@{ paths = $paths; validation = 'invalid' }
+    }
+  }
+  return [pscustomobject]@{ paths = $paths; validation = 'valid' }
+}
+
 # Compute the git side (review commits, boundary, forward scope) for a repo working tree.
 # Used for both in-path repos and resolved vault-only targets, so remediation is detectable
 # in BOTH cases — an outsideScanPath row must never be silently unfalsifiable.
-function Get-VaultReviewedTip {
+function Get-VaultBoundary {
   param([string]$RepoPath, $Vault)
   foreach ($evidence in @($Vault.reviewTarget, $Vault.reviewScope) | Where-Object { $_ }) {
-    # A single commit names the reviewed tip; a range names it after `..`. Anything with
-    # surrounding prose is deliberately not evidence precise enough to beat the date fallback.
-    $match = [regex]::Match($evidence, '(?i)^\s*(?:`|\*\*)?([0-9a-f]{7,40})(?:\.\.([0-9a-f]{7,40}))?(?:`|\*\*)?\s*$')
+    # A single commit names the reviewed tip; a range must have two valid commit endpoints.
+    # Symbolic HEAD is allowed only on the right, but a day-only record cannot make it exact.
+    # Use the immutable validated base as a conservative cutoff. Surrounding prose falls back.
+    $match = [regex]::Match($evidence, '(?i)^\s*(?:`|\*\*)?([0-9a-f]{7,40})(?:\.\.([0-9a-f]{7,40}|HEAD))?(?:`|\*\*)?\s*$')
     if (-not $match.Success) { continue }
-    $tip = if ($match.Groups[2].Success) { $match.Groups[2].Value } else { $match.Groups[1].Value }
+    $base = $match.Groups[1].Value
+    if ($match.Groups[2].Success) {
+      & git -C $RepoPath cat-file -e "$base^{commit}" 2>$null
+      if ($LASTEXITCODE -ne 0) { continue }
+    }
+    $tip = if ($match.Groups[2].Success) { $match.Groups[2].Value } else { $base }
+    if ($tip -ieq 'HEAD') {
+      $resolvedBase = & git -C $RepoPath rev-parse "$base^{commit}" 2>$null
+      if ($LASTEXITCODE -eq 0 -and $resolvedBase) {
+        return [pscustomobject]@{ sha = "$resolvedBase".Trim(); source = 'vault-symbolic-base' }
+      }
+      continue
+    }
     & git -C $RepoPath cat-file -e "$tip^{commit}" 2>$null
     if ($LASTEXITCODE -ne 0) { continue }
     $resolved = & git -C $RepoPath rev-parse "$tip^{commit}" 2>$null
-    if ($LASTEXITCODE -eq 0 -and $resolved) { return "$resolved".Trim() }
+    if ($LASTEXITCODE -eq 0 -and $resolved) {
+      return [pscustomobject]@{ sha = "$resolved".Trim(); source = 'vault-target' }
+    }
   }
   return $null
 }
 
 function Get-GitSide {
-  param([string]$RepoPath, $Vault, [string]$MarkerRegex, [string]$WebQualityRegex, [string]$SubsystemPath)
+  param([string]$RepoPath, $Vault, [string]$MarkerRegex, [string]$WebQualityRegex, [string[]]$SubsystemPaths, [string]$ScopeValidation = 'none')
+  if ($ScopeValidation -eq 'invalid') {
+    return [pscustomobject]@{
+      reviewCommits = @(); lastReviewDate = $Vault.date; batchMarkers = @()
+      boundarySha = $null; boundarySource = 'invalid-subsystem-scope'; vaultPredatesHistory = $false
+      neverReviewed = $false; effectiveNeverReviewed = $false; sinceReview = @()
+      sinceReviewCount = $null; sinceReviewFiles = $null; sinceReviewIns = $null; sinceReviewDel = $null
+      daysSinceReview = $null
+    }
+  }
   # When the review covered a SUBSYSTEM, every evidence query must be scoped to it by pathspec.
   # Otherwise the host repo's unrelated activity is attributed to the subsystem: widgetservice would
   # report all 977 of host-app's post-boundary commits as WidgetService work, and any unrelated
   # reviewer-findings commit elsewhere in the host would read as WidgetService remediation. Detecting
   # remediation is worthless if the number attached to it is the wrong repo's.
   $pathspec = @()
-  if ($SubsystemPath) { $pathspec = @('--', $SubsystemPath) }
+  if ($SubsystemPaths.Count) { $pathspec = @('--') + @($SubsystemPaths) }
   # One git call: full log with body, ISO date, and author trailers, NUL-delimited records.
   $fmt = '%H%x1f%cI%x1f%s%x1f%b%x1e'
   $raw = & git -C $RepoPath log HEAD "--format=$fmt" @pathspec 2>$null
@@ -351,11 +403,11 @@ function Get-GitSide {
   # Priority: (1) the vault adversarial-review date; (2) the newest non-web-quality git
   # review/remediation commit. A web-quality reviewer-findings commit never anchors the boundary.
   $boundarySha = $null; $lastReviewDate = $null; $boundarySource = 'none'; $vaultPredatesHistory = $false
-  $exactTip = $null
+  $targetBoundary = $null
   if ($Vault.exists) {
-    $exactTip = Get-VaultReviewedTip -RepoPath $RepoPath -Vault $Vault
-    if ($exactTip) {
-      $boundarySha = $exactTip; $lastReviewDate = $Vault.date; $boundarySource = 'vault-target'
+    $targetBoundary = Get-VaultBoundary -RepoPath $RepoPath -Vault $Vault
+    if ($targetBoundary) {
+      $boundarySha = $targetBoundary.sha; $lastReviewDate = $Vault.date; $boundarySource = $targetBoundary.source
     } elseif ($Vault.date) {
       # Tree the panel reviewed = last commit at/before the review's RUN time, not its day.
       # A day-granular `--until "<date> 23:59:59"` sweeps in commits that landed AFTER the
@@ -391,7 +443,7 @@ function Get-GitSide {
       }
     }
   }
-  if (-not $Vault.exists -or (-not $exactTip -and -not $Vault.date)) {
+  if (-not $Vault.exists -or (-not $targetBoundary -and -not $Vault.date)) {
     # No vault report: fall back to git markers, excluding web-quality sweeps from boundary candidacy.
     $adversarialCommits = @($reviewCommits | Where-Object { $_.subject -notmatch $WebQualityRegex })
     $lastReviewCommit = if ($adversarialCommits) { $adversarialCommits | Sort-Object date -Descending | Select-Object -First 1 } else { $null }
@@ -484,12 +536,12 @@ function Get-GitSide {
 # the host's unrelated source.
 $sourceExtRegex = '(?:\.(cs|ts|tsx|js|jsx|mjs|cjs|py|go|java|rb|rs|cpp|cc|c|h|hpp|kt|swift|php|scala|sql|ps1|psm1|sh|bicep|vue|svelte|fs|fsx|razor|cshtml|xaml|tf|proto|css|scss|sass|less)$|(?:^|/)Dockerfile(?:\..+)?$|(?:^|/)\.github/workflows/[^/]+\.ya?ml$)'
 function Get-HasTrackedSource {
-  param([string]$RepoPath, [string]$SubsystemPath)
-  if (-not $RepoPath) { return $null }
-  $pathspec = if ($SubsystemPath) { @('--', $SubsystemPath) } else { @() }
-  # Materialise BEFORE filtering: piping straight into Select-Object -First 1 short-circuits the
-  # pipeline, which makes $LASTEXITCODE unreliable on the success path — and stderr is discarded,
-  # so a failed ls-files would otherwise be indistinguishable from a verified-empty repo.
+  param([string]$RepoPath, [string[]]$SubsystemPaths, [string]$ScopeValidation = 'none')
+  if (-not $RepoPath) { return $false }
+  if ($ScopeValidation -eq 'invalid') { return $null }
+  $pathspec = if ($SubsystemPaths.Count) { @('--') + @($SubsystemPaths) } else { @() }
+  # Materialise before filtering: Select-Object -First 1 can short-circuit the
+  # native pipeline and make LASTEXITCODE unreliable on the success path.
   $out = @(& git -C $RepoPath ls-files @pathspec 2>$null)
   if ($LASTEXITCODE -ne 0) { return $null }
   return [bool](@($out | Where-Object { $_ -match $sourceExtRegex }).Count)
@@ -499,20 +551,23 @@ $results = foreach ($r in $repos) {
   $repoPath = $r.FullName
   # Vault first — its adversarial-review date is the preferred boundary (the tree a panel saw).
   $vault = Get-VaultData -RepoName $r.Name -VaultRoot $VaultRoot
+  $scope = Get-ValidatedSubsystemScope -RepoPath $repoPath -Paths $vault.subsystemPaths
   # Scope the git side to the reviewed subsystem when the review declared one. Calling
-  # this without -SubsystemPath was what made a subsystem pass look repo-wide.
-  $git = Get-GitSide -RepoPath $repoPath -Vault $vault -MarkerRegex $markerRegex -WebQualityRegex $webQualityRegex -SubsystemPath $vault.subsystemPath
+  # this without -SubsystemPaths was what made a subsystem pass look repo-wide.
+  $git = Get-GitSide -RepoPath $repoPath -Vault $vault -MarkerRegex $markerRegex -WebQualityRegex $webQualityRegex -SubsystemPaths $scope.paths -ScopeValidation $scope.validation
 
   [pscustomobject]@{
     repo = $r.Name
     git  = $git
     vault = $vault
     hasGraphify = [bool](Test-Path (Join-Path $repoPath 'graphify-out'))
-    hasTrackedSource = Get-HasTrackedSource -RepoPath $repoPath -SubsystemPath $vault.subsystemPath
+    hasTrackedSource = Get-HasTrackedSource -RepoPath $repoPath -SubsystemPaths $scope.paths -ScopeValidation $scope.validation
     outsideScanPath = $false
     resolvedPath = $repoPath
-    isSubsystem = [bool]$vault.subsystemPath
-    subsystemPath = $vault.subsystemPath
+    isSubsystem = [bool]$scope.paths.Count
+    subsystemPath = if ($scope.paths.Count -eq 1) { $scope.paths[0] } else { $null }
+    subsystemPaths = @($scope.paths)
+    scopeValidation = $scope.validation
     unresolved = $false
   }
 }
@@ -564,10 +619,13 @@ if (Test-Path $VaultRoot) {
             # by SHA or name silently became a repo-wide scan on this path only, so the row
             # reported a boundary the panel never established.
             $inPath.vault = $vd
-            $inPath.git = Get-GitSide -RepoPath $inPath.resolvedPath -Vault $vd -MarkerRegex $markerRegex -WebQualityRegex $webQualityRegex -SubsystemPath $vd.subsystemPath
-            $inPath.hasTrackedSource = Get-HasTrackedSource -RepoPath $inPath.resolvedPath -SubsystemPath $vd.subsystemPath
-            $inPath.isSubsystem = [bool]$vd.subsystemPath
-            $inPath.subsystemPath = $vd.subsystemPath
+            $scope = Get-ValidatedSubsystemScope -RepoPath $inPath.resolvedPath -Paths $vd.subsystemPaths
+            $inPath.git = Get-GitSide -RepoPath $inPath.resolvedPath -Vault $vd -MarkerRegex $markerRegex -WebQualityRegex $webQualityRegex -SubsystemPaths $scope.paths -ScopeValidation $scope.validation
+            $inPath.hasTrackedSource = Get-HasTrackedSource -RepoPath $inPath.resolvedPath -SubsystemPaths $scope.paths -ScopeValidation $scope.validation
+            $inPath.isSubsystem = [bool]$scope.paths.Count
+            $inPath.subsystemPath = if ($scope.paths.Count -eq 1) { $scope.paths[0] } else { $null }
+            $inPath.subsystemPaths = @($scope.paths)
+            $inPath.scopeValidation = $scope.validation
           }
           continue
         }
@@ -586,27 +644,31 @@ if (Test-Path $VaultRoot) {
       # (git pathspecs always do). Comparing raw strings reported 'src/Foo' and 'src\Foo' as a
       # disagreement and keyed the dedup set on both, emitting two rows for one subsystem.
       $normScope = { param($s) if ($s) { ($s -replace '[\\/]+', '/').Trim('/') } else { $s } }
-      $effectiveSubsystem = if ($vd.subsystemPath) { $vd.subsystemPath } else { $target.subsystemPath }
-      if ($vd.subsystemPath -and $target.subsystemPath -and
-          ((& $normScope $vd.subsystemPath) -ne (& $normScope $target.subsystemPath))) {
-        Write-Warning "$($v.Name): declared subsystem '$($vd.subsystemPath)' disagrees with the scope its report links resolve to ('$($target.subsystemPath)'); using the declared value."
+      $effectiveSubsystems = if ($vd.subsystemPaths.Count) { @($vd.subsystemPaths) } elseif ($target.subsystemPath) { @($target.subsystemPath) } else { @() }
+      if ($vd.subsystemPaths.Count -eq 1 -and $target.subsystemPath -and
+          ((& $normScope $vd.subsystemPaths[0]) -ne (& $normScope $target.subsystemPath))) {
+        Write-Warning "$($v.Name): declared subsystem '$($vd.subsystemPaths[0])' disagrees with the scope its report links resolve to ('$($target.subsystemPath)'); using the declared value."
       }
-      if (-not $resolvedThisPass.Add("$($target.repoPath)|$(& $normScope $effectiveSubsystem)")) { continue }
-      $git = Get-GitSide -RepoPath $target.repoPath -Vault $vd -MarkerRegex $markerRegex -WebQualityRegex $webQualityRegex -SubsystemPath $effectiveSubsystem
+      $normalisedScope = @($effectiveSubsystems | ForEach-Object { & $normScope $_ }) -join ','
+      if (-not $resolvedThisPass.Add("$($target.repoPath)|$normalisedScope")) { continue }
+      $scope = Get-ValidatedSubsystemScope -RepoPath $target.repoPath -Paths $effectiveSubsystems
+      $git = Get-GitSide -RepoPath $target.repoPath -Vault $vd -MarkerRegex $markerRegex -WebQualityRegex $webQualityRegex -SubsystemPaths $scope.paths -ScopeValidation $scope.validation
       [pscustomobject]@{
         repo = $v.Name
         git  = $git
         vault = $vd
         hasGraphify = [bool](Test-Path (Join-Path $target.repoPath 'graphify-out'))
-        hasTrackedSource = Get-HasTrackedSource -RepoPath $target.repoPath -SubsystemPath $effectiveSubsystem
+        hasTrackedSource = Get-HasTrackedSource -RepoPath $target.repoPath -SubsystemPaths $scope.paths -ScopeValidation $scope.validation
         outsideScanPath = $true
         resolvedPath = $target.repoPath
         # A SUBSYSTEM row is one whose reviewed code is a sub-path of the host repo
         # (widgetservice = host-app/Framework/Services/WidgetService). A mere name variance
         # (vault 'quickfixn' -> repo 'quickfix-n') is NOT a subsystem — same tree, so
         # keying this off the sub-path rather than the name keeps the two apart.
-        isSubsystem = [bool]$effectiveSubsystem
-        subsystemPath = $effectiveSubsystem
+        isSubsystem = [bool]$scope.paths.Count
+        subsystemPath = if ($scope.paths.Count -eq 1) { $scope.paths[0] } else { $null }
+        subsystemPaths = @($scope.paths)
+        scopeValidation = $scope.validation
         unresolved = $false
       }
     } else {
@@ -633,6 +695,8 @@ if (Test-Path $VaultRoot) {
         resolvedPath = $null
         isSubsystem = $false
         subsystemPath = $null
+        subsystemPaths = @()
+        scopeValidation = 'unknown'
         unresolved = $true
       }
     }
@@ -646,6 +710,7 @@ if (Test-Path $VaultRoot) {
 # (a code review whose repo could not be placed) still stands out.
 $unresolvedRows = @($results | Where-Object { $_.unresolved -and -not $_.vault.isDocumentReview })
 $docReviewRows  = @($results | Where-Object { $_.unresolved -and $_.vault.isDocumentReview })
+$invalidScopeRows = @($results | Where-Object { $_.scopeValidation -eq 'invalid' })
 if ($unresolvedRows) {
   Write-Warning ("UNRESOLVED vault folders (no repo found via file:/// links, scope sha, or name) — " +
     "their tallies are UNFALSIFIABLE and must NOT be reported as outstanding: " +
@@ -655,6 +720,11 @@ if ($docReviewRows) {
   Write-Warning ("DOCUMENT reviews (reviewed a document, NOT code — confer no code coverage, do not " +
     "credit as a reviewed repo): " +
     (($docReviewRows | ForEach-Object { "$($_.repo) [$($_.vault.reviewTarget)]" }) -join ', '))
+}
+if ($invalidScopeRows) {
+  Write-Warning ("INVALID subsystem scope (declared pathspec matched no tracked files) — " +
+    "Git and source evidence is UNKNOWN: " +
+    (($invalidScopeRows | ForEach-Object { "$($_.repo) [$(@($_.subsystemPaths) -join ', ')]" }) -join ', '))
 }
 
 $results | ConvertTo-Json -Depth 8 | Set-Content $OutFile -Encoding utf8

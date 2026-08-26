@@ -277,7 +277,28 @@ worse than no gate. `fetch-depth: 0` is required and is not optional tuning:
         run: |
           set -euo pipefail
           "$RUNNER_TEMP/gitleaks" git -v --redact --log-opts="--no-merges ${BASE_SHA}..${HEAD_SHA}" .
+
+      # BOTH SCANS ARE LOAD-BEARING. The range scan above is a commit-list scan: `git
+      # log -p` emits no merge-commit diffs at all without --diff-merges, so content
+      # written during a CONFLICT RESOLUTION — which exists only in the merge commit —
+      # is present in the HEAD tree and never presented to gitleaks. Dropping
+      # --no-merges does not fix it; it changes which commits are listed, not whether
+      # their diffs are emitted. Scanning the tree closes the hole directly.
+      #
+      # Keep the range scan too: it sees a secret that was committed and then removed
+      # later in the same branch, which the tree scan cannot.
+      - name: Scan the checked-out tree for secrets
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/gitleaks" dir -v --redact .
 ```
+
+`gitleaks dir` is the current spelling of what older versions called `detect --no-git`.
+It exists in 8.30.1; on an older pin, check before copying. Observed running clean on
+the PR path in `your-repo` PR #27
+(`Scan the checked-out tree for secrets -> success`), which is also the reason the step
+is worth having: that repo's `Secrets` job is `if: github.event_name == 'pull_request'`,
+so a green push build says nothing about whether either scan works.
 
 ### Pre-existing findings
 

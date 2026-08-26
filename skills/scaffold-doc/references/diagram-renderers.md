@@ -45,12 +45,46 @@ Do not convert a whole document. The cost is per-figure and so is the benefit.
 
 ## Validating either one
 
-| Renderer | Check | Command |
-|---|---|---|
-| Mermaid | It parses | `npx -y @mermaid-js/mermaid-cli@11.16.0 -i d.mmd -o d.svg` (exit 0 = parses; **pin the version**) |
-| `diagram-design` | Accessibility contract, single-file safety | `python <skill-dir>/scripts/self_check.py <file>` |
-| `diagram-design` | Geometry collisions — label masks over nodes, overlapping connectors | `python <clone>/scripts/verify-geometry.py <file>` |
-| `diagram-design` | Skin conformance against the brand token set | `python <clone>/scripts/lint-skin.py <file>` |
+The installed `diagram-design` skill ships its portable self-check, but its
+geometry and skin gates live only in a full verifier checkout. Set
+`DIAGRAM_DESIGN_VERIFIER_ROOT` to that checkout's `diagram-design` directory;
+the runner fails closed when the root or any required script is absent. No
+machine-specific clone path is assumed.
+
+```powershell
+$diagramVerifierRoot = Resolve-Path $env:DIAGRAM_DESIGN_VERIFIER_ROOT
+```
+
+Resolve the file and installed runner:
+
+```powershell
+$diagramFile = Resolve-Path './diagram.html'
+```
+
+```powershell
+$scaffoldDocRoot = Resolve-Path (Join-Path $HOME '.agents/skills/scaffold-doc')
+```
+
+```powershell
+$diagramVerifierRunner = Join-Path $scaffoldDocRoot 'scripts/run-diagram-verifiers.ps1'
+```
+
+Assert that the runner exists, then run all three Python verifiers. The runner
+also asserts each child script exists before invoking it.
+
+```powershell
+if (-not (Test-Path -LiteralPath $diagramVerifierRunner -PathType Leaf)) { throw "Diagram verifier runner not found: $diagramVerifierRunner" }
+```
+
+```powershell
+pwsh -NoProfile -File $diagramVerifierRunner -File $diagramFile -VerifierRoot $diagramVerifierRoot
+```
+
+Validate Mermaid separately with its pinned parser:
+
+```powershell
+npx -y @mermaid-js/mermaid-cli@11.16.0 -i d.mmd -o d.svg
+```
 
 > [!NOTE]
 > On Windows, `diagram-design`'s `mermaid_extract.py` fails on the default console encoding —

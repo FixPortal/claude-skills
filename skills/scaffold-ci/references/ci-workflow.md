@@ -291,6 +291,49 @@ the token layer, so without a ref check anyone could deploy a feature branch), a
 pushes (`refs/tags/v*`) fire prod. The infra/targets are repo-specific — point at this
 pattern, don't fabricate Bicep or environments that don't exist.
 
+### A tag trigger is not a review gate — assert ancestry
+
+**A ref gate on `refs/tags/v*` proves the ref's SHAPE, never that the commit was
+reviewed.** `git push origin v1.2.3` puts the tag on whatever commit you name, including
+one that never opened a PR, and the workflow then builds and publishes it. Tag creation
+is unrestricted by default: rulesets target branches, and a branch ruleset does not
+constrain tags. An adversarial-review sweep found this in three estate repos on the same
+day; both repos checked had **zero** tag-target rulesets, so nothing outside the workflow
+was enforcing anything.
+
+Two fixes, and they are not alternatives — the first is the one that works without
+administrative state:
+
+1. **Assert reachability from the default branch, before restore.** Fails closed and is
+   visible in the diff:
+
+   ```yaml
+         # Full fetch of main, not --depth: the tag may name an older main commit, and a
+         # shallow fetch leaves merge-base no shared history to walk.
+         - name: Assert the tagged commit is reachable from main
+           run: |
+             set -euo pipefail
+             git fetch --no-tags origin main
+             if ! git merge-base --is-ancestor "$GITHUB_SHA" FETCH_HEAD; then
+               echo "::error::Tag '${GITHUB_REF_NAME}' names a commit that is not reachable from main. Only reviewed, merged commits may be released."
+               exit 1
+             fi
+   ```
+
+   This works from `actions/checkout`'s default depth-1 clone — verified by
+   reproduction: fetch the tagged SHA at depth 1, then `git fetch --no-tags origin main`,
+   then `merge-base --is-ancestor`, which exits 0 for a commit that is genuinely an
+   ancestor. Do not assume it needs `fetch-depth: 0`.
+
+2. **Where publish is triggered by a branch push rather than a tag, gate on the ref
+   itself** — `if: github.event_name == 'push' && github.ref == 'refs/heads/main'` — and
+   drop the `v*` tag trigger entirely if nothing needs it. A tag push satisfies
+   `github.event_name == 'push'`, so the event check alone gates nothing.
+
+Add a tag ruleset as defence in depth if you want one, but write the assertion first:
+the workflow is in the repo and reviewable, the ruleset is administrative state nobody
+diffs.
+
 ### Job naming — CI dashboard lane contract
 
 A CI dashboard (`your-repo`) sorts workflow **jobs** into
@@ -376,8 +419,19 @@ Rules, each of which is a way this goes wrong:
   leaves the pull request permanently unmergeable. The failure mode is the opposite of what
   you would expect: a broken build produces an unblockable PR rather than a blocked one.
 - **`skipped` counts as a pass**, which is what lets job-level `if:` conditions and path
-  filtering work. `failure` and `cancelled` do not. The accepted cost is that a job skipped
-  by a *bug* in its `if:` satisfies the gate silently.
+  filtering work. `failure` and `cancelled` do not. That used to be recorded here as an
+  accepted cost — a job skipped by a *bug* in its `if:` satisfies the gate silently. It is
+  no longer accepted: `assert_gate_coverage.py` refuses a job-level `if:` on any job
+  feeding the gate, so a conditional quality job has to be named in
+  `GATE_CONDITIONAL_EXEMPT` with a written rationale beside it. Conditional exemption does
+  **not** exempt a job from gate membership; that is `GATE_EXEMPT` alone.
+- **The gate's own semantics are asserted, not assumed.** `needs:` membership does not
+  make a gate real: with no `if: always()` it is skipped exactly when it was needed, and
+  with no step keyed on a `needs.<job>.result` it aggregates nothing and reports success
+  unconditionally. Both keep the job, its name and its `needs:` list intact, so neither
+  reads as a coverage change in a diff. The checker fails on both. This is the in-repo
+  half of a fix whose other half is tiering `ci.yml` and the checker HIGH — see
+  `review-policy.md`, and the `$comment` block in `review-policy.example.json`.
 - **The gate has no `permissions`, no checkout and no network.** It only reads
   GitHub-controlled `needs.*.result`. It is the one job deciding what can merge, so it gets
   zero token authority and nothing that can fail on its own.

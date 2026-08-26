@@ -130,18 +130,10 @@ unrecognised path is unknown risk, and unknown risk is not low risk.
 - **`high`** is broadly portable: migrations, `infra/**`, `**/*.bicep`,
   `.github/dependabot.yml`, auth paths and money-ledger writes. Still trim it to globs the
   repo actually has.
-- **`.github/workflows/**` is deliberately NOT HIGH, and must not be re-added.** It was
-  removed on 2026-08-19 and replaced by assertions in `review-policy-guard.yml`, on the
-  same reasoning as `.gitignore` a fortnight earlier. Measured across the 100 most recent
-  HIGH-tier PRs of the preceding 30 days: config-only diffs were 27 of them and produced
-  **four** actionable CodeRabbit comments between them, while code-bearing diffs produced
-  174. In the same sample **45 of 100 HIGH PRs received no CodeRabbit verdict at all** —
-  throttled out, CodeRabbit's own notice reporting 73 reviews in 7 days against a 30/7d
-  degradation threshold. The glob was not buying review of workflow changes; it was
-  crowding out review of code, and which PRs got reviewed was decided by arrival time
-  rather than by risk. `.github/dependabot.yml` stays HIGH: it is edited a few times a
-  year, so it costs almost nothing, and a change to it alters what gets patched and how
-  fast — which the guard's assertions cannot see.
+- **`.github/workflows/**` is deliberately NOT HIGH, and must not be re-added.** Workflow
+  hygiene is asserted mechanically; the measured review-budget rationale is in
+  [provenance.md](provenance.md). `.github/dependabot.yml` stays HIGH because its semantic
+  policy cannot be checked by the workflow parser.
 - **Dependency manifests do NOT belong in `high`** — not `package.json`,
   `package-lock.json`, `Directory.Packages.props`, `**/*.csproj`. **Reversed 2026-07-29**;
   this list used to include them on supply-chain grounds. Dependency PRs are now out of AI
@@ -156,6 +148,10 @@ unrecognised path is unknown risk, and unknown risk is not low risk.
   the lighter review. The guard and checker are on the list because the required
   `Review policy intact` context is produced by the PR's own copy of the workflow, so
   neutering its steps would otherwise pass unreviewed.
+- **So must the merge barrier** — `.github/workflows/ci.yml`,
+  `.github/workflows/review-policy-guard.yml`, `.github/scripts/assert_gate_coverage.py`,
+  `.github/scripts/assert_workflow_hygiene.py`. These are named paths, not a restored
+  broad workflow glob; adjust `ci.yml` when a repository uses another main workflow name.
 - **`.gitignore` is deliberately NOT HIGH, and must not be re-added.** It was removed
   on 2026-08-02 and replaced by `review-policy-guard.yml` (below). Tiering it HIGH does
   work, but it bills a CodeRabbit review — metered per developer across the whole

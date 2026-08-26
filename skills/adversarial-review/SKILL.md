@@ -150,26 +150,16 @@ review worktree.
 
 ## Telemetry
 
-Use wrapper sidecars when available. Where a selector is a moving alias,
-`run-review.ps1` resolves the actual invoked model and current prices from the
-canonical model registry; when that cannot be resolved, record unknown/zero
-transport cost with `costUnknown=true`, rendered as `UNKNOWN`, rather than a
-stale estimate or a displayed zero.
-
-`IssuesAccepted` credits only a vendor's own Phase-1 findings that survive
-adjudication and verification. The driver writes `pooled-map.json`
-(F# → `{id, vendor}`) into the run root; adjudicated findings must carry their
-pooled F-id provenance so acceptance is derivable from that map — never
-hand-reconstructed, and never derived from consensus tags. Accepted cannot
-exceed raised. Subscription-backed calls
-have zero marginal API spend, while a declared API fallback is metered and must
-be disclosed.
-
-**Who emits.** Multi-chunk runs emit via `aggregate-and-emit.ps1`. A **single-chunk**
-run has no aggregator: the host calls `emit-review-telemetry.ps1` after Phase 4, once
-per participant plus the judge, with the work directory's `-RunId`. The Observatory
-upserts on `(runId, reviewer, role)` — a repeated `Role` overwrites, an omitted one is
-a swallowed HTTP 400. Skip this and a single-chunk run never reaches the dashboard.
+Emit one telemetry row for every manifest-derived participant plus the judge. Multi-chunk
+runs use `aggregate-and-emit.ps1`; for a single chunk, call
+`emit-review-telemetry.ps1` after Phase 4 with the work directory's `-RunId`. Include
+`Role` because the Observatory upserts on `(runId, reviewer, role)`. Credit
+`IssuesAccepted` only to the vendor's own Phase-1 findings that survive adjudication and
+verification; derive ownership from pooled provenance, and never let accepted exceed
+raised. The driver's `pooled-map.json` is the F-id-to-vendor source; never reconstruct
+ownership from consensus tags. Resolve moving model aliases and prices through the
+canonical model registry. When resolution fails, preserve `costUnknown=true` and render
+`UNKNOWN`, never zero or a stale estimate. Disclose every metered fallback.
 
 ## Canonical contracts
 

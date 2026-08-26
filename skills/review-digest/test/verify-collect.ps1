@@ -57,17 +57,14 @@ $gap = $neverReviewed[0]
 if ($gap.git.reviewCommits -isnot [array]) { throw "$($gap.repo): reviewCommits must be an array even when empty" }
 if (-not $gap.git.neverReviewed) { throw "$($gap.repo): zero reviewCommits but neverReviewed flag not set" }
 
-# vault side: engine has a panel + a judge slot + a severity tally parsed from the latest run _index.md.
-# NOTE: judge is a shape check (property present, null-or-string), not a truthiness
-# check — a real report can legitimately have `reviewers:` with no `judge:` key at
-# all (single-model or no-adjudication runs), and collect.ps1 defaults it to $null
-# rather than omitting the property.
+# Vault-side compatibility shape. Panel composition and tally are mutable live data; the
+# hermetic fixture owns parsing correctness.
 if (-not $engine.vault.exists) { throw "engine vault not detected" }
-if ($engine.vault.reviewers.Count -lt 1) { throw "engine vault reviewers not parsed" }
+if ($null -eq $engine.vault.PSObject.Properties['reviewers']) { throw "engine vault missing reviewers property" }
 if ($null -eq $engine.vault.PSObject.Properties['judge']) { throw "engine vault missing judge property" }
 if ($null -ne $engine.vault.judge -and $engine.vault.judge -isnot [string]) { throw "engine vault judge, when present, must be a string" }
-if ($null -eq $engine.vault.tally.High) { throw "engine vault tally.High not parsed" }
-"collect.ps1 vault-side OK — engine panel: $($engine.vault.reviewers -join ', ') | judge: $($engine.vault.judge)"
+if ($null -eq $engine.vault.PSObject.Properties['tally']) { throw "engine vault missing tally property" }
+"collect.ps1 live compatibility OK — engine scopeValidation=$($engine.scopeValidation)"
 
 # ci-frontend uses a Markdown-table tally format; it must still parse a High count
 $cif = $data | Where-Object { $_.repo -eq '<your-table-tally-repo>' }
@@ -167,17 +164,19 @@ foreach ($row in @($data | Where-Object { $_.subsystemPath })) {
 # The hermetic Resolve-VaultTarget fixture block lives in verify-resolver-fixtures.ps1:
 # it builds its own git repos and vault under temp, so it runs on CI where this file cannot.
 
-# --- forward-looking scope fields (commits since last review) ---
-# a reviewed repo carries a boundary sha, a since-review commit list, counts, age, and graphify flag
+# --- forward-looking scope field compatibility ---
 if ($null -eq $engine.git.PSObject.Properties['boundarySha']) { throw "engine missing git.boundarySha" }
-if (-not $engine.git.boundarySha) { throw "engine (reviewed) must have a non-null boundarySha" }
 if ($null -eq $engine.git.PSObject.Properties['sinceReview']) { throw "engine missing git.sinceReview" }
 if ($null -eq $engine.git.PSObject.Properties['sinceReviewCount']) { throw "engine missing git.sinceReviewCount" }
-if ($engine.git.sinceReviewCount -lt 0) { throw "engine sinceReviewCount must be >= 0" }
-if ($engine.git.neverReviewed) { throw "engine should NOT be flagged neverReviewed" }
 if ($null -eq $engine.git.PSObject.Properties['daysSinceReview']) { throw "engine missing git.daysSinceReview" }
-if ($engine.git.daysSinceReview -lt 0) { throw "engine daysSinceReview must be >= 0" }
 if ($null -eq $engine.PSObject.Properties['hasGraphify']) { throw "engine missing hasGraphify flag" }
+if ($engine.scopeValidation -eq 'invalid') {
+    if ($engine.git.boundarySha) { throw "invalid engine scope must not emit a boundary" }
+    if ($null -ne $engine.git.sinceReviewCount) { throw "invalid engine scope must emit unknown/null sinceReviewCount" }
+    if ($engine.git.neverReviewed -or $engine.git.effectiveNeverReviewed) { throw "invalid engine scope is UNKNOWN, not never reviewed" }
+} elseif ($null -ne $engine.git.sinceReviewCount -and $engine.git.sinceReviewCount -lt 0) {
+    throw "engine sinceReviewCount must be null or non-negative"
+}
 
 # a never-reviewed repo: null/empty boundary, flagged neverReviewed, well-typed commit count
 if ($gap.git.boundarySha) { throw "$($gap.repo) (unreviewed) must have a null/empty boundarySha" }
@@ -187,6 +186,6 @@ if ($gap.git.sinceReviewCount -isnot [int] -and $gap.git.sinceReviewCount -isnot
     throw "$($gap.repo) sinceReviewCount must be an integer (got $gotType)"
 }
 if ($gap.git.sinceReviewCount -lt 0) { throw "$($gap.repo) sinceReviewCount must be a non-negative int" }
-"collect.ps1 scope-side OK — engine since-review: $($engine.git.sinceReviewCount) commit(s), $($engine.git.daysSinceReview)d stale"
+"collect.ps1 scope-side compatibility OK — engine scopeValidation=$($engine.scopeValidation)"
 
 "collect.ps1 git-side OK — $($data.Count) repos"

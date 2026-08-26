@@ -28,6 +28,10 @@ $scanRoot = Join-Path $fixtureRoot 'scan'
 $scanRepo = Join-Path $scanRoot 'placeholder'
 $scopeRepo = Join-Path $scanRoot 'scope-quoted'
 $markerRepo = Join-Path $scanRoot 'marker-only'
+$multiScopeRepo = Join-Path $scanRoot 'multi-scope'
+$invalidScopeRepo = Join-Path $scanRoot 'invalid-scope'
+$invalidBaseRepo = Join-Path $scanRoot 'invalid-base'
+$brokenSourceRepo = Join-Path $scanRoot 'broken-source-probe'
 $sourceFixtures = @(
     @{ name = 'source-razor';    file = 'Pages/Index.razor' },
     @{ name = 'source-xaml';     file = 'App.xaml' },
@@ -63,14 +67,23 @@ $brokenRepo = Join-Path $scanRoot 'broken-git'
 function Normalize([string] $path) { ($path -replace '\\', '/') }
 
 function New-FixtureCommit {
-    param([string]$Repo, [string]$File, [string]$Subject, [string]$Body = '')
+    param([string]$Repo, [string]$File, [string]$Subject, [string]$Body = '', [string]$Date = '')
     $filePath = Join-Path $Repo $File
     New-Item -ItemType Directory -Force -Path (Split-Path $filePath -Parent) | Out-Null
     Set-Content -LiteralPath $filePath -Value $Subject
     & git -C $Repo add -- $File
     if ($LASTEXITCODE -ne 0) { throw "git add failed for fixture '$Repo'" }
-    if ($Body) { & git -C $Repo commit --quiet -m $Subject -m $Body }
-    else { & git -C $Repo commit --quiet -m $Subject }
+    $oldAuthorDate = $env:GIT_AUTHOR_DATE
+    $oldCommitterDate = $env:GIT_COMMITTER_DATE
+    try {
+        if ($Date) { $env:GIT_AUTHOR_DATE = $Date; $env:GIT_COMMITTER_DATE = $Date }
+        if ($Body) { & git -C $Repo commit --quiet -m $Subject -m $Body }
+        else { & git -C $Repo commit --quiet -m $Subject }
+    }
+    finally {
+        $env:GIT_AUTHOR_DATE = $oldAuthorDate
+        $env:GIT_COMMITTER_DATE = $oldCommitterDate
+    }
     if ($LASTEXITCODE -ne 0) { throw "git commit failed for fixture '$Repo'" }
     $sha = & git -C $Repo rev-parse HEAD
     if ($LASTEXITCODE -ne 0) { throw "git rev-parse failed for fixture '$Repo'" }
@@ -81,7 +94,7 @@ function New-FixtureCommit {
 # the .git assertion), and anything thrown outside it would bypass finally and strand the
 # fixture directories on disk.
 try {
-    foreach ($r in @($linkRepo, $spacedRepo, $appRepo, $appOldRepo, $scanRepo, $scopeRepo, $markerRepo, $quotedRepo, $predateRepo) + @($sourceFixtures | ForEach-Object path)) {
+    foreach ($r in @($linkRepo, $spacedRepo, $appRepo, $appOldRepo, $scanRepo, $scopeRepo, $markerRepo, $quotedRepo, $predateRepo, $multiScopeRepo, $invalidScopeRepo, $invalidBaseRepo) + @($sourceFixtures | ForEach-Object path)) {
         New-Item -ItemType Directory -Force -Path $r | Out-Null
         & git init --quiet $r 2>$null | Out-Null
         if ($LASTEXITCODE -ne 0) { throw "git init failed (exit $LASTEXITCODE) for fixture repo '$r'" }
@@ -94,6 +107,11 @@ try {
         & git -C $r config user.name 'Review Digest Fixture'
         if ($LASTEXITCODE -ne 0) { throw "git config user.name failed (exit $LASTEXITCODE) for fixture repo '$r'" }
     }
+
+    # It looks like a repository to the collector but every Git probe fails. Source
+    # enumeration must remain unknown/null, never collapse to the valid empty value false.
+    New-Item -ItemType Directory -Force -Path $brokenSourceRepo | Out-Null
+    Set-Content -LiteralPath (Join-Path $brokenSourceRepo '.git') -Value 'gitdir: missing-git-directory'
 
     $baseSha = New-FixtureCommit -Repo $scanRepo -File 'README.md' -Subject 'chore: initial fixture'
     $reviewedTip = New-FixtureCommit -Repo $scanRepo -File 'src/Reviewed.cs' -Subject 'feat: reviewed change'
@@ -109,18 +127,30 @@ try {
     New-FixtureCommit -Repo $markerRepo -File 'README.md' -Subject 'chore: initial fixture' | Out-Null
     New-FixtureCommit -Repo $markerRepo -File 'notes.md' -Subject 'fix(review): record follow-up' | Out-Null
 
-    # Subjects carry the repo name: identical subject+content+timestamp would produce the SAME
-    # commit sha in every fixture repo, and the sha-resolution fixture below then matches
-    # multiple repos (correctly reported ambiguous) instead of resolving uniquely.
+    # Distinct subjects keep these commits unique across fixture repositories.
     $quotedBaseSha = New-FixtureCommit -Repo $quotedRepo -File 'README.md' -Subject 'chore: initial quoted-target fixture'
     New-FixtureCommit -Repo $quotedRepo -File 'src/Reviewed.cs' -Subject 'feat: quoted-target reviewed change' | Out-Null
-
     New-FixtureCommit -Repo $predateRepo -File 'README.md' -Subject 'chore: squashed initial import' | Out-Null
     New-FixtureCommit -Repo $predateRepo -File 'src/Main.cs' -Subject 'feat: post-squash work' | Out-Null
 
     # Not in the git-init loop: the point is that .git is a FILE whose gitdir resolves nowhere.
     New-Item -ItemType Directory -Force -Path $brokenRepo | Out-Null
     Set-Content -LiteralPath (Join-Path $brokenRepo '.git') -Value 'gitdir: /nonexistent-fixture-target'
+
+    $multiBaseSha = New-FixtureCommit -Repo $multiScopeRepo -File 'README.md' -Subject 'chore: initial fixture' -Date '2026-01-01T12:00:00Z'
+    $multiReviewSha = New-FixtureCommit -Repo $multiScopeRepo -File 'src/Reviewed.cs' -Subject 'reviewer-findings batch 9: fix scoped source' -Date '2026-01-02T12:00:00Z'
+    New-FixtureCommit -Repo $multiScopeRepo -File 'tools/Outside.cs' -Subject 'reviewer-findings batch 10: outside declared scope' -Date '2026-01-03T12:00:00Z' | Out-Null
+    $multiHeadSha = New-FixtureCommit -Repo $multiScopeRepo -File 'samples/YourOrg.Demo.Host/Program.cs' -Subject 'feat: add scoped sample' -Date '2026-01-04T12:00:00Z'
+    $invalidBaseSha = New-FixtureCommit -Repo $invalidScopeRepo -File 'README.md' -Subject 'chore: initial fixture'
+    New-FixtureCommit -Repo $invalidScopeRepo -File 'src/App.cs' -Subject 'reviewer-findings batch 11: fix real source' | Out-Null
+    New-FixtureCommit -Repo $invalidBaseRepo -File 'README.md' -Subject 'chore: initial fixture' -Date '2026-01-01T12:00:00Z' | Out-Null
+    $invalidBaseReviewedTip = New-FixtureCommit -Repo $invalidBaseRepo -File 'src/Reviewed.cs' -Subject 'feat: reviewed change' -Date '2026-01-02T12:00:00Z'
+    New-FixtureCommit -Repo $linkRepo -File 'README.md' -Subject 'chore: add root fixture' | Out-Null
+    New-FixtureCommit -Repo $linkRepo -File 'src/Foo/Bar.cs' -Subject 'feat: add linked fixture' | Out-Null
+    New-FixtureCommit -Repo $spacedRepo -File 'src/Foo/Bar.cs' -Subject 'feat: add encoded fixture' | Out-Null
+    New-FixtureCommit -Repo $appRepo -File 'src/Foo/a.cs' -Subject 'feat: add first sibling fixture' | Out-Null
+    New-FixtureCommit -Repo $appRepo -File 'src/Foo/b.cs' -Subject 'feat: add second sibling fixture' | Out-Null
+    New-FixtureCommit -Repo $appOldRepo -File 'src/Foo/c.cs' -Subject 'feat: add overlapping sibling fixture' | Out-Null
     foreach ($fixture in $sourceFixtures) {
         New-FixtureCommit -Repo $fixture.path -File $fixture.file -Subject "feat: add $($fixture.name)" | Out-Null
     }
@@ -170,8 +200,37 @@ try {
     New-Item -ItemType Directory -Force -Path $scopeRun | Out-Null
     @(
         '---', 'project: scope-quoted', 'review-type: adversarial-review',
-        'date: 2030-01-01', "scope: `"$scopeBaseSha..$scopeReviewedTip`"", 'reviewers: [Fixture]', '---', '', '# Fixture', ''
+        'date: 2030-01-01', "scope: `"$scopeBaseSha..$scopeReviewedTip`"", 'subsystem: src/**',
+        'reviewers: [Fixture]', '---', '', '# Fixture', ''
     ) | Set-Content (Join-Path $scopeRun '_index.md')
+    $multiRun = Join-Path $fixtureVault 'multi-scope' '20260104T180000Z'
+    New-Item -ItemType Directory -Force -Path $multiRun | Out-Null
+    @(
+        '---', 'project: multi-scope', 'review-type: adversarial-review',
+        'date: 2026-01-04', "target: $multiBaseSha..HEAD", 'subsystem:',
+        '  - src/**', '  - samples/YourOrg.Demo.Host/**',
+        'reviewers: [Fixture]', '---', '', '# Fixture', ''
+    ) | Set-Content (Join-Path $multiRun '_index.md')
+    $invalidBaseRun = Join-Path $fixtureVault 'invalid-base' '20260102T180000Z'
+    New-Item -ItemType Directory -Force -Path $invalidBaseRun | Out-Null
+    @(
+        '---', 'project: invalid-base', 'review-type: adversarial-review',
+        'date: 2026-01-02', 'target: deadbee..HEAD', 'subsystem: src/**',
+        'reviewers: [Fixture]', '---', '', '# Fixture', ''
+    ) | Set-Content (Join-Path $invalidBaseRun '_index.md')
+
+    # These commits land after the persisted reviews. Resolving symbolic HEAD at collection
+    # time would move both boundaries forward and erase this genuinely unreviewed work.
+    $multiPostReviewSha = New-FixtureCommit -Repo $multiScopeRepo -File 'src/PostReview.cs' -Subject 'feat: same-day post-review scoped work' -Date '2026-01-04T20:00:00Z'
+    $invalidBasePostReviewSha = New-FixtureCommit -Repo $invalidBaseRepo -File 'src/PostReview.cs' -Subject 'feat: post-review work' -Date '2026-01-03T12:00:00Z'
+    $invalidRun = Join-Path $fixtureVault 'invalid-scope' '20300101T000000Z'
+    New-Item -ItemType Directory -Force -Path $invalidRun | Out-Null
+    @(
+        '---', 'project: invalid-scope', 'review-type: adversarial-review',
+        'date: 2030-01-01', "target: $invalidBaseSha..HEAD",
+        'subsystem: src/** + samples/YourOrg.Demo.Host (tests, docs and CI/build config excluded by scope)',
+        'reviewers: [Fixture]', '---', '', '# Fixture', ''
+    ) | Set-Content (Join-Path $invalidRun '_index.md')
 
     # Same quoted scope shape, but in a vault-ONLY folder so it flows through
     # Resolve-VaultTarget's own raw-text re-parse (stage 2) rather than Get-VaultData's
@@ -212,6 +271,11 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "collect.ps1 exited $LASTEXITCODE on the fixture vault" }
     $fx = Get-Content $fixtureOut -Raw | ConvertFrom-Json
 
+    $brokenSource = $fx | Where-Object { $_.repo -eq 'broken-source-probe' }
+    if (-not $brokenSource) { throw "fixture 'broken-source-probe' produced no row" }
+    if ($null -eq $brokenSource.PSObject.Properties['hasTrackedSource']) { throw 'broken source fixture is missing hasTrackedSource' }
+    if ($null -ne $brokenSource.hasTrackedSource) { throw "failed git ls-files must emit unknown/null hasTrackedSource, got '$($brokenSource.hasTrackedSource)'" }
+
     $main = $fx | Where-Object { $_.repo -eq 'placeholder' }
     if (-not $main) { throw "fixture 'placeholder' produced no row" }
     if ($main.git.boundarySha -ne $reviewedTip) { throw "exact vault target must anchor at reviewed tip '$reviewedTip', got '$($main.git.boundarySha)'" }
@@ -224,8 +288,41 @@ try {
 
     $quotedScope = $fx | Where-Object { $_.repo -eq 'scope-quoted' }
     if (-not $quotedScope) { throw "fixture 'scope-quoted' produced no row" }
+    if ($quotedScope.scopeValidation -ne 'valid' -or @($quotedScope.subsystemPaths).Count -ne 1 -or $quotedScope.subsystemPaths[0] -ne 'src/**') { throw "scalar subsystem pathspec must validate and remain a one-item list" }
     if ($quotedScope.git.boundarySha -ne $scopeReviewedTip) { throw "quoted scope range must anchor at reviewed tip '$scopeReviewedTip', got '$($quotedScope.git.boundarySha)'" }
     if ($quotedScope.git.boundarySource -ne 'vault-target') { throw "quoted scope range boundarySource should be 'vault-target', got '$($quotedScope.git.boundarySource)'" }
+
+    $multiScope = $fx | Where-Object { $_.repo -eq 'multi-scope' }
+    if (-not $multiScope) { throw "fixture 'multi-scope' produced no row" }
+    if ($multiScope.scopeValidation -ne 'valid') { throw "multi-path subsystem scope must validate, got '$($multiScope.scopeValidation)'" }
+    if (@($multiScope.subsystemPaths).Count -ne 2) { throw "multi-path subsystem must retain two pathspecs, got '$(@($multiScope.subsystemPaths) -join ', ')'" }
+    if ($multiScope.subsystemPaths[0] -ne 'src/**' -or $multiScope.subsystemPaths[1] -ne 'samples/YourOrg.Demo.Host/**') { throw "multi-path subsystem pathspecs changed: '$(@($multiScope.subsystemPaths) -join ', ')'" }
+    if (-not $multiScope.hasTrackedSource) { throw 'multi-path subsystem must find tracked source across its validated pathspecs' }
+    if (@($multiScope.git.reviewCommits).Count -ne 1 -or $multiScope.git.reviewCommits[0].sha -ne $multiReviewSha) { throw "multi-path Git evidence must contain only the scoped review commit '$multiReviewSha'" }
+    $boundaryFailures = @()
+    if ($multiScope.git.boundarySha -ne $multiBaseSha) { $boundaryFailures += "date-only <base>..HEAD must conservatively anchor immutable base '$multiBaseSha', got '$($multiScope.git.boundarySha)'" }
+    if ($multiScope.git.boundarySource -ne 'vault-symbolic-base') { $boundaryFailures += "date-only <base>..HEAD boundarySource should be 'vault-symbolic-base', got '$($multiScope.git.boundarySource)'" }
+    if (@($multiScope.git.sinceReview | Where-Object { $_.sha -eq $multiHeadSha }).Count -ne 1) { $boundaryFailures += "conservative cutoff must honestly re-list review-time commit '$multiHeadSha'" }
+    if (@($multiScope.git.sinceReview | Where-Object { $_.sha -eq $multiPostReviewSha }).Count -ne 1) { $boundaryFailures += "same-day post-review commit '$multiPostReviewSha' must remain in sinceReview" }
+    if ($multiScope.git.sinceReviewCount -ne 3) { $boundaryFailures += "conservative symbolic boundary must expose all 3 scoped commits after base, got '$($multiScope.git.sinceReviewCount)'" }
+
+    $invalidBase = $fx | Where-Object { $_.repo -eq 'invalid-base' }
+    if (-not $invalidBase) { throw "fixture 'invalid-base' produced no row" }
+    if ($invalidBase.scopeValidation -ne 'valid') { throw "invalid-base fixture subsystem must validate, got '$($invalidBase.scopeValidation)'" }
+    if ($invalidBase.git.boundarySource -ne 'vault-date') { $boundaryFailures += "deadbee..HEAD must reject invalid base and fall back to vault-date, got '$($invalidBase.git.boundarySource)'" }
+    if ($invalidBase.git.boundarySha -ne $invalidBaseReviewedTip) { $boundaryFailures += "invalid-base fallback must anchor dated tip '$invalidBaseReviewedTip', got '$($invalidBase.git.boundarySha)'" }
+    if (@($invalidBase.git.sinceReview).Count -ne 1 -or $invalidBase.git.sinceReview[0].sha -ne $invalidBasePostReviewSha) { $boundaryFailures += "invalid-base fallback must retain post-review commit '$invalidBasePostReviewSha'" }
+    if ($boundaryFailures.Count) { throw ($boundaryFailures -join "`n") }
+
+    $invalidScope = $fx | Where-Object { $_.repo -eq 'invalid-scope' }
+    if (-not $invalidScope) { throw "fixture 'invalid-scope' produced no row" }
+    if ($invalidScope.scopeValidation -ne 'invalid') { throw "descriptive subsystem scope must be invalid, got '$($invalidScope.scopeValidation)'" }
+    if ($null -eq $invalidScope.PSObject.Properties['hasTrackedSource']) { throw 'invalid scope row is missing hasTrackedSource' }
+    if ($null -ne $invalidScope.hasTrackedSource) { throw "invalid scope source evidence must be unknown/null, got '$($invalidScope.hasTrackedSource)'" }
+    if ($invalidScope.git.boundarySource -ne 'invalid-subsystem-scope') { throw "invalid scope boundarySource should be 'invalid-subsystem-scope', got '$($invalidScope.git.boundarySource)'" }
+    if ($invalidScope.git.boundarySha) { throw "invalid scope must not emit a review boundary, got '$($invalidScope.git.boundarySha)'" }
+    if ($invalidScope.git.neverReviewed -or $invalidScope.git.effectiveNeverReviewed) { throw "invalid scope is UNKNOWN, not never reviewed" }
+    if ($null -ne $invalidScope.git.sinceReviewCount) { throw "invalid scope history count must be unknown/null, got '$($invalidScope.git.sinceReviewCount)'" }
 
     $markerOnly = $fx | Where-Object { $_.repo -eq 'marker-only' }
     if (-not $markerOnly) { throw "fixture 'marker-only' produced no row" }
@@ -328,7 +425,7 @@ try {
     if ($sib.resolvedPath -ne $appRepo) { throw "sibling fixture resolved to '$($sib.resolvedPath)', expected '$appRepo'" }
     if ((Normalize $sib.subsystemPath) -ne 'src/Foo') { throw "sibling fixture subsystemPath should be 'src/Foo', got '$($sib.subsystemPath)' - a prefix-overlapping sibling ('app-old') is being treated as part of 'app'" }
 
-    "collect.ps1 resolver regression OK - root-file -> no subsystem; nested -> '$($nested.subsystemPath)'; unplaceable -> unresolved; %20 -> '$($enc.subsystemPath)'; sibling-boundary -> '$($sib.subsystemPath)' (all via production Resolve-VaultTarget)"
+    "collect.ps1 resolver regression OK - multi-path + invalid scope evidence; root-file -> no subsystem; nested -> '$($nested.subsystemPath)'; unplaceable -> unresolved; %20 -> '$($enc.subsystemPath)'; sibling-boundary -> '$($sib.subsystemPath)'"
 }
 finally {
     Remove-Item $fixtureRoot -Recurse -Force -ErrorAction SilentlyContinue

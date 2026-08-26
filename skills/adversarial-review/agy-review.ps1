@@ -33,7 +33,16 @@ param(
 
     [string] $RepoPath,
     [string] $OutPath,
-    [string] $UsageSidecarPath
+    [string] $UsageSidecarPath,
+
+    # agy's ceiling on waiting for a response. 5m killed slots that a 20m ceiling
+    # recovered on the FIRST attempt in two separate runs (20260816T095922Z C6,
+    # 20260816T214504Z G), while four identical retries at 5m recovered nothing.
+    # Payload size is not the variable: a 125KB chunk succeeded while 45KB and 53KB
+    # chunks failed. Retrying a wrapper timeout without raising this is wasted spend.
+    # See ~/.agents/notes/model-routing-traps.md trap 8.
+    [ValidatePattern('^\d+[smh]$')]
+    [string] $PrintTimeout = '20m'
 )
 
 $OutputEncoding = [System.Text.UTF8Encoding]::new($false)
@@ -89,13 +98,23 @@ try {
         }
     }
 
+    # ABSOLUTE paths, and an explicit ban on searching. agy does NOT resolve a bare
+    # `brief.txt` against its working directory - it SEARCHES the filesystem and reads
+    # whichever match it picks ("I am currently locating `brief.txt` on your system",
+    # run 20260816T214504Z). The wrapper's file placement and Push-Location below are
+    # correct and are not the defect; the bare filenames here were, and they poisoned the
+    # Google axis across at least four runs with findings from other repositories. The
+    # hazard is the whole of %TEMP%, where this wrapper's own workspace also lives, so no
+    # amount of stale-directory sweeping bounds it. See model-routing-traps.md trap 8.
     $prompt = @(
         'You are a READ-ONLY code reviewer on an adversarial review panel.'
-        'Read brief.txt and follow it exactly.'
-        'Review only the change in review-diff.txt.'
-        $(if ($FindingsPath) { 'Cross-examine pooled-findings.txt as the brief directs.' })
-        $(if ($contextPaths) { 'Use files under context/ only as supporting background; do not raise findings against them.' })
+        "Read the brief at $(Join-Path $work 'brief.txt') and follow it exactly."
+        "Review ONLY the change in $(Join-Path $work 'review-diff.txt')."
+        $(if ($FindingsPath) { "Cross-examine $(Join-Path $work 'pooled-findings.txt') as the brief directs." })
+        $(if ($contextPaths) { "Use files under $(Join-Path $work 'context') only as supporting background; do not raise findings against them." })
         $(if ($RepoPath) { "You may read the repository at $RepoPath for context; do not modify it." })
+        'Do NOT search the filesystem for these files. Use exactly the absolute paths given above.'
+        'If a path above cannot be read, stop and say so; never substitute another file.'
         'Output only the review text in the exact format the brief requests. No preamble or narration.'
     ) | Where-Object { $_ }
 
@@ -109,7 +128,7 @@ try {
         '--model', $Model
         '--mode', 'plan'
         '--effort', $agyEffort
-        '--print-timeout', '5m'
+        '--print-timeout', $PrintTimeout
     )
     if ($RepoPath) {
         if (-not (Test-Path -LiteralPath $RepoPath -PathType Container)) {

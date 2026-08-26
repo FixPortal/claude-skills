@@ -64,6 +64,42 @@ try {
     foreach ($fragment in @('--mode plan', '--model gemini-3.1-pro-high', '--effort high')) {
         if ($argsText -notlike "*$fragment*") { throw "agy invocation missing '$fragment': $argsText" }
     }
+
+    # trap 8: agy resolves a BARE filename by searching the filesystem, not against its
+    # working directory, so a prompt saying "read brief.txt" let it pick another agent's
+    # scratchpad out of %TEMP% and review a different repository. The prompt must name
+    # every input by absolute path and forbid the search outright.
+    foreach ($banned in 'Read brief.txt', 'change in review-diff.txt', 'Cross-examine pooled-findings.txt') {
+        if ($argsText -like "*$banned*") {
+            throw "prompt names an input by bare filename, which agy resolves by search: $banned"
+        }
+    }
+    foreach ($required in 'Do NOT search the filesystem', 'never substitute another file') {
+        if ($argsText -notlike "*$required*") { throw "prompt does not forbid the filesystem search: $required" }
+    }
+    if ($argsText -notmatch 'brief\.txt') { throw 'prompt does not reference the brief at all' }
+    # Capture the cited path by anchoring on the prompt phrase and matching NON-GREEDILY to
+    # the filename. A character class that cannot cross a space (`[^ ]*`, or `\S+`) stops at
+    # the first one, so on any host whose temp directory contains a space -- an ordinary
+    # `<user-profile>\AppData\Local\Temp\...` on a runner with a real user name -- the
+    # match fails against a wrapper that is behaving correctly. Same class of false failure
+    # as the host-specific assertion below, reached by a different route.
+    if ($argsText -notmatch 'Read the brief at (?<brief>.+?brief\.txt)') {
+        throw "prompt does not cite the brief by path: $argsText"
+    }
+    # Absolute in BOTH shapes: a Windows drive-letter root and a POSIX leading slash. Asserted
+    # by pattern rather than [IO.Path]::IsPathRooted, which answers for whichever host runs the
+    # test -- an assertion written for the authoring host only is a host check wearing a
+    # contract's clothes, and that one passed on Windows and failed on the Linux runner against
+    # a wrapper that was behaving correctly.
+    if ($Matches['brief'] -notmatch '^(?:[A-Za-z]:[\\/]|/)') {
+        throw "prompt must cite brief.txt by absolute path, got: $($Matches['brief'])"
+    }
+
+    # trap 8: a hardcoded 5m ceiling killed slots that 20m recovered on the first attempt,
+    # and retrying at the same ceiling recovered nothing in four attempts.
+    if ($argsText -like '*--print-timeout 5m*') { throw 'print-timeout is pinned back to the 5m ceiling that kills slots' }
+    if ($argsText -notlike '*--print-timeout 20m*') { throw "default print-timeout must be 20m: $argsText" }
     if ((Get-Content $out -Raw).Trim() -ne 'FAKE REVIEW') { throw 'wrapper did not write the review text' }
     $usageJson = Get-Content $usage -Raw | ConvertFrom-Json
     if ($usageJson.inputTokens -ne 0 -or $usageJson.outputTokens -ne 0 -or $usageJson.costUsd -ne 0) {

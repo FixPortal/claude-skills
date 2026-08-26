@@ -34,8 +34,11 @@ Before triage, verify every target is on the approved merged mainline and the
 pass covers one named subsystem. Stop for explicit approval if either cannot be
 proved or the request is broader.
 
-Use `review-digest`'s `.git.effectiveNeverReviewed` directly:
-`hasTrackedSource=false` is skip/void, and unknown source evidence means unknown is STOP.
+Use `review-digest`'s validated scope and `.git.effectiveNeverReviewed` directly.
+Evaluate `scopeValidation` first: `scopeValidation=invalid` is UNKNOWN + STOP.
+Only after `scopeValidation` is usable (`valid`, or `none` for a whole-repo
+row) may `hasTrackedSource=false` map to skip/void; missing or null source
+evidence is unknown is STOP. Never re-infer scope validity from Git.
 
 Present the complete evidence-driven plan once. After approval, record units in
 the runtime's durable plan and run them to completion in the agent loop. Reviews

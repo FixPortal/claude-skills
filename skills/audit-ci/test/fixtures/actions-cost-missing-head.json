@@ -1,0 +1,15 @@
+{
+  "run": {
+    "id": 4242,
+    "conclusion": "success"
+  },
+  "total_count": 1,
+  "jobs": [
+    {
+      "name": "Backend (.NET)",
+      "started_at": "2026-08-26T10:00:00Z",
+      "completed_at": "2026-08-26T10:06:00Z",
+      "conclusion": "success"
+    }
+  ]
+}

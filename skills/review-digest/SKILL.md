@@ -47,6 +47,13 @@ repo), `hasTrackedSource` (tri-state: true/false for a verified probe — false 
 repo — and **null when the `git ls-files` probe itself failed**: that is UNKNOWN, never a
 verified "no source"), and `outsideScanPath`.
 
+Subsystem evidence also carries `subsystemPaths` (zero or more Git pathspecs) and
+`scopeValidation`: `none` for a whole-repo review, `valid` when every declared or derived
+pathspec selects tracked files, `invalid` when any pathspec selects none, and `unknown` for an
+unresolved vault folder. `hasTrackedSource` is null when `scopeValidation = invalid` or its
+`git ls-files` probe fails; that is unknown evidence, never proof that the reviewed scope
+contains no source.
+
 **`isDocumentReview` — a document review is NOT code coverage.** When true (e.g. `resumes-cv`,
 `target: your-cv.html` — a reviewed CV), the review confers zero coverage on any
 code. Render such a row as reviewed-a-document, never as a reviewed (or unreviewed) code repo,
@@ -73,11 +80,25 @@ and is dropped (its own newer in-path row already covers it). Resulting fields:
 - `resolvedPath` — the git repo whose tree the review actually covered. The git side
   (`sinceReview`, boundary, staleness) is computed against THIS path, so remediation on an
   `outsideScanPath` row is detectable rather than structurally invisible.
-- `isSubsystem` / `subsystemPath` — true when the reviewed code is a sub-path of the host repo
+- `isSubsystem` / `subsystemPaths` — true when the reviewed code is one or more Git pathspecs
+  within the host repo
   (`widgetservice` → `host-app` + `Framework\Services\WidgetService`). Every git query for such a row
-  is **pathspec-scoped to `subsystemPath`**, so its counts are the subsystem's, not the host's.
+  is **pathspec-scoped to the validated `subsystemPaths`**, so its counts are the subsystem's,
+  not the host's. `subsystemPath` remains populated only for the single-path compatibility case.
   When describing one, name the HOST repo and the sub-path — never the vault folder alone. A
   mere name variance (`quickfixn` → `quickfix-n`) is not a subsystem: same tree, no sub-path.
+- `subsystem:` accepts either one scalar Git pathspec or a YAML list of pathspecs, for example:
+
+  ```yaml
+  subsystem:
+    - src/**
+    - samples/YourOrg.Demo.Host/**
+  ```
+
+  Each pathspec must independently match at least one tracked file via `git ls-files -- <path>`
+  before any scoped history query runs. A descriptive sentence or stale path that matches
+  nothing emits `scopeValidation = invalid`, null source/history evidence, and the explicit
+  `invalid-subsystem-scope` boundary state. Treat that row as UNKNOWN, not unreviewed or void.
 - `unresolved` — true when nothing could be placed on disk. The script `Write-Warning`s these.
   **Never report an unresolved row's tally as outstanding.**
 
@@ -86,7 +107,11 @@ and the hand-off report:
 - `boundarySha` — sha of the last point a genuine ADVERSARIAL review saw the tree.
   Null when the repo was never reviewed.
 - `boundarySource` — how the boundary was chosen: `vault-target` (a validated exact commit or
-  `<base>..<tip>` in vault `target:` / `scope:` evidence; preferred), `vault-date` (last commit
+  `<base>..<tip-sha>` in vault `target:` / `scope:` evidence; preferred). Both range endpoints must
+  resolve as commits. `vault-symbolic-base` means a persisted `<base>..HEAD` supplied no immutable
+  tip: the collector uses the validated base as a conservative approximate cutoff, so reviewed
+  commits may be re-listed but same-day post-review work cannot be hidden. Producers must persist
+  the resolved tip SHA to establish an exact boundary. `vault-date` means the last commit
   on/before the vault adversarial-review date),
   `vault-predates-history` (the vault review is older than the repo's earliest commit,
   e.g. an OSS re-init squash — the boundary is CLEARED and the repo is treated as
@@ -96,7 +121,8 @@ and the hand-off report:
   report — found a reachable review/remediation subject), `none` (never reviewed),
   `scoped-query-failed` / `scoped-no-history-before-review` (a subsystem could not establish a
   date boundary), or `unresolved-vault-folder` (a vault folder that could not be placed on disk
-  — review state UNKNOWN, see `neverReviewed` below). Those eight are the only values
+  — review state UNKNOWN, see `neverReviewed` below), or `invalid-subsystem-scope` (declared
+  pathspecs matched no tracked files, so all scoped Git evidence is UNKNOWN). Those ten are the only values
   `collect.ps1` ever assigns; a repo sitting outside
   the scanned path is flagged by the separate boolean `outsideScanPath`, not by this
   field. Web-quality
@@ -105,7 +131,8 @@ and the hand-off report:
   previously faked `sinceReview=0`.
 - `vaultPredatesHistory` — true for the OSS-re-init case above.
 - `neverReviewed` — true when there is no `boundarySha`. **One deliberate exception:** an
-  `unresolved` row has a null `boundarySha` but `neverReviewed = false`, because a review
+  `unresolved` or `scopeValidation = invalid` row has a null `boundarySha` but
+  `neverReviewed = false`, because a review
   demonstrably happened (`vault.exists`) — we just cannot place the code it covered. Its state
   is UNKNOWN, not "never". Flagging it `true` would assert a falsehood and score it
   `100 + commits`, floating an unknown to the top of the rank. Unresolved rows are excluded
@@ -156,7 +183,7 @@ shown for context but **does not feed the score**.
 Per repo:
 
 ```
-eligible = !outsideScanPath && !isDocumentReview && !unresolved   # reviewed elsewhere / not code / unplaceable
+eligible = !outsideScanPath && !isDocumentReview && !unresolved && scopeValidation != invalid
 effectiveNeverReviewed = git.effectiveNeverReviewed
 
 score =

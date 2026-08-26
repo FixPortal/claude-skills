@@ -192,33 +192,34 @@ function Group-FilesByOwningRepo {
 function Get-ProjectDocuments {
     <# Enumerate and parse each project/props/targets file ONCE. Package references and
        policy properties are both read from this single parsed set, rather than each
-       walking (and re-parsing) the whole tree independently.
-
-       A parse failure is recorded in $ParseErrors, not dropped silently: an unparsed
-       file's PackageReferences and policy properties must be told apart from a repo
-       that declares none - the same discipline UnreadablePaths carries for the walk. #>
-    param([object[]] $Files, [string] $Repo, [System.Collections.Generic.List[string]] $ParseErrors)
+       walking (and re-parsing) the whole tree independently. #>
+    param(
+        [object[]] $Files,
+        [string] $Repo,
+        [System.Collections.Generic.List[object]] $ParseErrors,
+        [System.Collections.Generic.List[object]] $UnreadableFiles
+    )
 
     $docs = [System.Collections.Generic.List[object]]::new()
     foreach ($file in ($Files | Where-Object { $_.Name -match $ProjectFilePattern })) {
-        try { [xml] $xml = Get-Content -LiteralPath $file.FullName -Raw }
+        $relative = [IO.Path]::GetRelativePath($Repo, $file.FullName)
+        try { $content = Get-Content -LiteralPath $file.FullName -Raw }
         catch {
-            if ($null -ne $ParseErrors) {
-                # The exception message can embed the ABSOLUTE file path (a drive-root
-                # user-profile path down to the project file), and ParseErrors is
-                # serialised into the emitted JSON -- leaking machine-local paths into
-                # a report that travels.
-                # Record the repo-relative path and strip the repo-root prefix from the
-                # message, keeping the failure kind without the filesystem layout.
-                $relative = [IO.Path]::GetRelativePath($Repo, $file.FullName)
-                $message = $_.Exception.Message -replace [regex]::Escape($Repo), '<repo>'
-                $ParseErrors.Add("${relative}: $message")
-            }
+            $message = $_.Exception.Message -replace [regex]::Escape($Repo), '<repo>'
+            $UnreadableFiles.Add([pscustomobject]@{ Path = $relative; Error = $message })
+            Write-Warning "Could not read '$($file.FullName)': $($_.Exception.Message)"
+            continue
+        }
+        try { [xml] $xml = $content }
+        catch {
+            $message = $_.Exception.Message -replace [regex]::Escape($Repo), '<repo>'
+            $ParseErrors.Add([pscustomobject]@{ Kind = 'ProjectXml'; Path = $relative; Error = $message })
+            Write-Warning "Could not parse '$($file.FullName)': $($_.Exception.Message)"
             continue
         }
         $docs.Add([pscustomobject]@{
             Xml      = $xml
-            Relative = [IO.Path]::GetRelativePath($Repo, $file.FullName)
+            Relative = $relative
         })
     }
     return $docs
@@ -270,7 +271,13 @@ function Get-PolicyProperties {
 function Get-BundledAnalyzers {
     <# A shared CodeStyle package can ship SonarAnalyzer plus a global AnalyzerConfig.
        Grepping the repo will never reveal this. Look inside the cached package. #>
-    param([string] $Id, [string] $Version, [string] $CacheFolder)
+    param(
+        [string] $Id,
+        [string] $Version,
+        [string] $CacheFolder,
+        [System.Collections.Generic.List[object]] $ParseErrors,
+        [System.Collections.Generic.List[object]] $UnreadableFiles
+    )
 
     $root = Join-Path $CacheFolder (Join-Path $Id.ToLowerInvariant() $Version)
     if (-not (Test-Path -LiteralPath $root)) {
@@ -286,12 +293,27 @@ function Get-BundledAnalyzers {
     $nuspec = Get-ChildItem -LiteralPath $root -Filter '*.nuspec' -File -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($nuspec) {
         try {
-            [xml] $x = Get-Content -LiteralPath $nuspec.FullName -Raw
+            $content = Get-Content -LiteralPath $nuspec.FullName -Raw
+        }
+        catch {
+            $UnreadableFiles.Add([pscustomobject]@{ Path = $nuspec.FullName; Error = $_.Exception.Message })
+            Write-Warning "Could not read '$($nuspec.FullName)': $($_.Exception.Message)"
+            $content = $null
+        }
+        try {
+            if ($null -eq $content) { throw 'Nuspec content was not read.' }
+            [xml] $x = $content
             $deps = @($x.SelectNodes("//*[local-name()='dependency']") | ForEach-Object {
                 [pscustomobject]@{ Id = $_.GetAttribute('id'); Version = $_.GetAttribute('version') }
             })
         }
-        catch { $deps = @() }
+        catch {
+            if ($null -ne $content) {
+                $ParseErrors.Add([pscustomobject]@{ Kind = 'NuspecXml'; Path = $nuspec.FullName; Error = $_.Exception.Message })
+                Write-Warning "Could not parse '$($nuspec.FullName)': $($_.Exception.Message)"
+            }
+            $deps = $null
+        }
     }
 
     $configs = @(
@@ -311,25 +333,46 @@ function Get-BundledAnalyzers {
 }
 
 function Get-GitStatus {
-    <# Returns $null on a failed capture, a result object on success. The object wrapper is
-       load-bearing: a CLEAN repo yields zero status lines, and `return @($status)` on an
-       empty result unrolls to nothing on the pipeline -- indistinguishable from the $null
-       failure return, so every clean repo reported GitStatusFailed and Mutated=$null.
-       An explicit Ok flag keeps "read successfully, nothing to report" apart from
+    <# Always returns an explicit result object. A CLEAN repo yields zero status lines;
+       the Success flag keeps "read successfully, nothing to report" distinct from
        "could not be read". #>
     param([string] $Repo)
     try {
-        $status = & git -C $Repo status --porcelain 2>$null
-        if ($LASTEXITCODE -ne 0) { return $null }
-        return [pscustomobject]@{ Ok = $true; Lines = @($status) }
+        $output = @(& git -C $Repo status --porcelain 2>&1)
+        $exitCode = $LASTEXITCODE
+        if ($exitCode -ne 0) {
+            $error = ((($output | ForEach-Object { $_.ToString() }) -join "`n").Trim() -replace [regex]::Escape($Repo), '<repo>')
+            if (-not $error) { $error = "git status exited with code $exitCode." }
+            return [pscustomobject]@{
+                Success  = $false
+                Status   = @()
+                ExitCode = $exitCode
+                Error    = $error
+            }
+        }
+        return [pscustomobject]@{
+            Success  = $true
+            Status   = @($output | ForEach-Object { $_.ToString() })
+            ExitCode = 0
+            Error    = $null
+        }
     }
-    catch { return $null }
+    catch {
+        return [pscustomobject]@{
+            Success  = $false
+            Status   = @()
+            ExitCode = -1
+            Error    = ($_.Exception.Message -replace [regex]::Escape($Repo), '<repo>')
+        }
+    }
 }
 
 function Get-RepoInventory {
     param([object[]] $Files, [string] $Repo)
 
     $before = Get-GitStatus -Repo $Repo
+    $parseErrors = [System.Collections.Generic.List[object]]::new()
+    $unreadableFiles = [System.Collections.Generic.List[object]]::new()
 
     # Both `dotnet` calls must run FROM the repo: NuGet.config and global.json are
     # resolved by walking up from the working directory, so a repo-local
@@ -358,8 +401,7 @@ function Get-RepoInventory {
             ForEach-Object { [IO.Path]::GetRelativePath($Repo, $_.FullName) }
     )
 
-    $parseErrors = [System.Collections.Generic.List[string]]::new()
-    $documents = Get-ProjectDocuments -Files $files -Repo $Repo -ParseErrors $parseErrors
+    $documents = Get-ProjectDocuments -Files $files -Repo $Repo -ParseErrors $parseErrors -UnreadableFiles $unreadableFiles
     $refs      = Get-PackageRefs -Documents $documents
 
     # Anything that plausibly ships analyzers, plus every GlobalPackageReference:
@@ -373,10 +415,16 @@ function Get-RepoInventory {
         $analyzerish |
             Where-Object { $_.Version } |
             Sort-Object Id, Version -Unique |
-            ForEach-Object { Get-BundledAnalyzers -Id $_.Id -Version $_.Version -CacheFolder $CacheFolder }
+            ForEach-Object {
+                Get-BundledAnalyzers -Id $_.Id -Version $_.Version -CacheFolder $CacheFolder `
+                    -ParseErrors $parseErrors -UnreadableFiles $unreadableFiles
+            }
     )
 
     $after = Get-GitStatus -Repo $Repo
+    $mutated = if ($before.Success -and $after.Success) {
+        (($before.Status -join "`n") -ne ($after.Status -join "`n"))
+    } else { $null }
 
     # A failed capture is $null, and $null -eq $null, so joining both nulls would
     # compare equal and emit Mutated=$false -- an unreadable `git status` rendered as
@@ -395,13 +443,12 @@ function Get-RepoInventory {
         AnalyzerPackages    = $analyzerish
         BundledAnalyzers    = $bundled
         AllPackageRefs      = $refs
-        GitStatusBefore     = if ($before) { @($before.Lines) } else { $null }
-        GitStatusAfter      = if ($after) { @($after.Lines) } else { $null }
-        GitStatusFailed     = $gitStatusFailed
-        Mutated             = if ($gitStatusFailed) { $null } else { (($before.Lines -join "`n") -ne ($after.Lines -join "`n")) }
-        # Non-empty means a project file could not be parsed; its package references and
-        # policy properties are UNKNOWN, not absent. Treat like UnreadablePaths.
         ParseErrors         = @($parseErrors)
+        UnreadableFiles     = @($unreadableFiles)
+        GitStatusBefore     = $before
+        GitStatusAfter      = $after
+        Mutated             = $mutated
+        MutationState       = if ($null -eq $mutated) { 'Unknown' } elseif ($mutated) { 'Changed' } else { 'Unchanged' }
     }
 }
 

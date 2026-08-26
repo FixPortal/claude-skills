@@ -13,20 +13,19 @@ This is a question set, not a framework. No records, no roles, no phases.
 
 ## Dispatch
 
-Send **one** subagent at tier `frontier`, resolved through the `model-registry` skill
-and then translated to the `Agent` tool's short alias. Give it read-only tools, the
-diff, the five questions and the output contract below.
+Resolve tier `frontier` through `model-registry` when supported. Send **one** reviewer
+through the runtime's native subagent facility; assume no tool or alias.
+Supply the diff, questions and output contract.
+
+With no subagent, run it in the current agent and label it `single-agent fallback`.
+Without an enforceable read-only allowlist, capture `git status --short`,
+`git rev-parse HEAD`, `git diff --binary HEAD`, and hashes of reported untracked files
+before and after. Any change stops the review as a coverage gap; never discard it.
 
 Scope it past the diff: Q1, Q2 and Q5 turn on the collaborators the changed code calls,
 the store and context configuration, and the queue or endpoint registration — it must
 read those too. Where the available code does not settle a question, report a
 finding-shaped gap naming what could not be read, never `clear`.
-
-One subagent, not a panel: the point is that the reviewer is not the reasoning that
-produced the code. A cross-vendor panel would be more independent still and was
-rejected as overhead.
-
-Report what it returns. Do not re-litigate its answers.
 
 ## The five questions
 

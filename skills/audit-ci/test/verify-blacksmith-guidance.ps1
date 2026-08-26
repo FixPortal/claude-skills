@@ -5,6 +5,7 @@ $scaffoldRoot = Join-Path $root 'scaffold-ci'
 $scaffoldSkill = Get-Content (Join-Path $scaffoldRoot 'SKILL.md') -Raw
 $ciContract = Get-Content (Join-Path $scaffoldRoot 'references' 'ci-workflow.md') -Raw
 $securityContract = Get-Content (Join-Path $scaffoldRoot 'references' 'dependencies-and-security.md') -Raw
+$reviewContract = Get-Content (Join-Path $scaffoldRoot 'references' 'review-policy.md') -Raw
 $secretSweep = Get-Content (Join-Path $scaffoldRoot 'assets' 'secret-sweep.yml') -Raw
 
 # audit-ci consumes the shipped scaffold contract; it must not retain a second,
@@ -12,9 +13,20 @@ $secretSweep = Get-Content (Join-Path $scaffoldRoot 'assets' 'secret-sweep.yml')
 foreach ($reference in 'scaffold-ci/SKILL.md',
                        'scaffold-ci/references/ci-workflow.md',
                        'scaffold-ci/references/dependencies-and-security.md',
+                       'scaffold-ci/references/review-policy.md',
+                       'scaffold-ci/assets/assert_gate_coverage.py',
+                       'scaffold-ci/assets/assert_workflow_hygiene.py',
                        'scaffold-ci/assets/secret-sweep.yml') {
     if ($text -notmatch [regex]::Escape($reference)) {
         throw "SKILL.md must reference the authoritative scaffold-ci contract: $reference"
+    }
+}
+foreach ($path in '.github/workflows/ci.yml',
+                  '.github/workflows/review-policy-guard.yml',
+                  '.github/scripts/assert_gate_coverage.py',
+                  '.github/scripts/assert_workflow_hygiene.py') {
+    if ($reviewContract -notmatch [regex]::Escape($path)) {
+        throw "scaffold-ci no longer declares the merge-barrier path audit-ci consumes: $path"
     }
 }
 

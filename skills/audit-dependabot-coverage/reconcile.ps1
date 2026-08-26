@@ -59,16 +59,17 @@ $ErrorActionPreference = 'Stop'
 # covered because they correspond to the two PR kinds:
 #   single-dep: "Bumps [nanoid](https://...) from 3.3.16 to 3.3.18."
 #   grouped:    "Updates `@azure/msal-browser` from 5.17.3 to 5.18.0"
-# The branch is NOT used FOR THE PACKAGE NAME: a grouped branch carries only a hash
-# (dependabot/npm_and_yarn/web/npm-minor-and-patch-eff5aeb2ab) and names no package,
-# so branch parsing would miss every grouped fix while looking like it worked.
-# The branch IS used separately for the directory/ecosystem target — see
-# Test-DependabotPrTargetsAlert below.
+# The body identifies packages. The branch contributes ecosystem/directory context;
+# a grouped branch carries only a hash where a package name would otherwise appear.
 function Test-DependabotPrCoversPackage {
     [OutputType([bool])]
     param(
         [Parameter(Mandatory)][AllowEmptyString()][string]$Body,
-        [Parameter(Mandatory)][AllowEmptyString()][string]$PackageName
+        [Parameter(Mandatory)][AllowEmptyString()][string]$PackageName,
+        [AllowEmptyString()][string]$HeadRefName = '',
+        [AllowEmptyString()][string]$ManifestPath = '',
+        [AllowEmptyString()][string]$Ecosystem = '',
+        [switch]$RequireTargetContext
     )
 
     if ([string]::IsNullOrWhiteSpace($Body) -or [string]::IsNullOrWhiteSpace($PackageName)) {
@@ -90,10 +91,52 @@ function Test-DependabotPrCoversPackage {
         "(?im)^\s*(?:>\s*)?Updates\s+$pkg\s+from\s"
     )
 
+    $packageMatched = $false
     foreach ($p in $patterns) {
-        if ($Body -match $p) { return $true }
+        if ($Body -match $p) { $packageMatched = $true; break }
     }
-    return $false
+    if (-not $packageMatched) { return $false }
+
+    # Package-only mode is retained for the lexical matcher tests. Reconciliation
+    # always supplies alert context and therefore takes the fail-closed path below.
+    if ([string]::IsNullOrWhiteSpace($ManifestPath) -and
+        [string]::IsNullOrWhiteSpace($Ecosystem)) { return -not $RequireTargetContext }
+
+    $branchMatch = [regex]::Match(
+        $HeadRefName, '^dependabot/(?<ecosystem>[^/]+)(?:/(?<target>.+))?$')
+    if (-not $branchMatch.Success) { return $false }
+
+    $prEcosystem = switch ($branchMatch.Groups['ecosystem'].Value.ToLowerInvariant()) {
+        'npm_and_yarn'   { 'npm' }
+        'github_actions' { 'github-actions' }
+        'bundler'        { 'rubygems' }
+        'gomod'          { 'go' }
+        'cargo'          { 'rust' }
+        default          { $_ }
+    }
+    if (-not [string]::IsNullOrWhiteSpace($Ecosystem) -and
+        $prEcosystem -ne $Ecosystem.Trim().ToLowerInvariant()) { return $false }
+
+    if ([string]::IsNullOrWhiteSpace($ManifestPath)) { return $true }
+
+    $manifest = $ManifestPath.Replace('\', '/').Trim('/')
+    $lastSlash = $manifest.LastIndexOf('/')
+    $alertDirectory = if ($lastSlash -lt 0) { '' } else { $manifest.Substring(0, $lastSlash) }
+
+    $directoryMatch = [regex]::Match(
+        $Body,
+        '(?im)^\s*Bumps\s+.+?\s+group\s+with\s+\d+\s+updates?\s+in\s+the\s+/(?<directory>.*?)\s+directory:')
+    if ($directoryMatch.Success) {
+        $prDirectory = $directoryMatch.Groups['directory'].Value.Trim('/')
+    } else {
+        $target = $branchMatch.Groups['target'].Value
+        $branchPackage = [regex]::Escape($PackageName.Trim().TrimStart('@').Replace('/', '-'))
+        $packageInBranch = [regex]::Match($target, "(?i)(?:^|/)$branchPackage(?:-[^/]+)?$")
+        if (-not $packageInBranch.Success) { return $false }
+        $prDirectory = $target.Substring(0, $packageInBranch.Index).Trim('/')
+    }
+
+    return $prDirectory -ceq $alertDirectory
 }
 
 # --- where the fix lands -------------------------------------------------------
@@ -156,16 +199,32 @@ function Test-DependabotPrTargetsAlert {
 function Invoke-Gh {
     param([Parameter(Mandatory)][string[]]$Arguments, [switch]$AllowFailure)
 
-    $out = & gh @Arguments 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        $detail = (($out | ForEach-Object { "$_" }) -join ' ').Trim()
-        if ($AllowFailure) {
-            Write-Verbose "gh $($Arguments -join ' ') failed (exit $LASTEXITCODE): $detail"
-            return $null
-        }
-        throw "gh $($Arguments -join ' ') failed with exit ${LASTEXITCODE}: $detail"
+    $stderrPath = [System.IO.Path]::GetTempFileName()
+    try {
+        $out = & gh @Arguments 2> $stderrPath
+        $exitCode = $LASTEXITCODE
+        $stderr = (Get-Content -LiteralPath $stderrPath -Raw -ErrorAction SilentlyContinue)
+    } finally {
+        Remove-Item -LiteralPath $stderrPath -Force -ErrorAction SilentlyContinue
     }
+
+    if ($exitCode -ne 0) {
+        $diagnostic = ([string]$stderr -replace '\s+', ' ').Trim()
+        if ([string]::IsNullOrWhiteSpace($diagnostic)) { $diagnostic = "gh exited $exitCode" }
+        if ($diagnostic.Length -gt 512) { $diagnostic = $diagnostic.Substring(0, 509) + '...' }
+        $script:lastGhError = $diagnostic
+        if ($AllowFailure) { return $null }
+        throw "gh $($Arguments -join ' ') failed with exit $exitCode`: $diagnostic"
+    }
+    $script:lastGhError = $null
     return $out
+}
+
+function Get-NotCheckedReason {
+    param([Parameter(Mandatory)][string]$Reason)
+
+    if ($script:lastGhError) { return "$Reason`: $script:lastGhError" }
+    return $Reason
 }
 
 function Get-RepoList {
@@ -181,15 +240,9 @@ function Get-RepoList {
         # Derived live, never a hard-coded list: a repo added after this was written
         # would otherwise be silently uncovered, which is the same silent-absence
         # class of failure the script exists to catch.
-        # -Org is documented to accept an organisation OR a user, but the repos
-        # endpoint differs (`orgs/{o}/repos` vs `users/{o}/repos`) and the org one
-        # 404s on a user owner. Resolve the owner type first, then pick the route.
-        $ownerType = Invoke-Gh @('api', "users/$o", '-q', '.type')
-        $segment = if ($ownerType -eq 'Organization') { 'orgs' } else { 'users' }
-        # Paginated via the REST API: `gh repo list --limit N` returns the first N
-        # and exits 0, so every repo past the cap would be silently uncovered.
-        $names = Invoke-Gh @('api', '--paginate', "$segment/$o/repos?per_page=100",
-                             '-q', '.[] | select(.archived == false) | .full_name')
+        $query = 'query($endCursor:String,$owner:String!){repositoryOwner(login:$owner){repositories(first:100,after:$endCursor,isArchived:false,ownerAffiliations:OWNER){nodes{nameWithOwner}pageInfo{hasNextPage,endCursor}}}}'
+        $names = Invoke-Gh @('api', 'graphql', '--paginate', '-f', "query=$query",
+            '-F', "owner=$o", '--jq', '.data.repositoryOwner.repositories.nodes[].nameWithOwner')
         if ($names) { $all += @($names) }
     }
     return @($all | Where-Object { $_ })
@@ -242,7 +295,66 @@ function ConvertFrom-PrListJson {
     # Dependabot PRs" back into "unreadable", destroying the one distinction this
     # function exists to make. The unary comma preserves the array. Caught by the test
     # for the '[]' case; the same unroll trap also bit -Repo with a single element.
-    return ,$parsed
+    if ($parsed.Count -eq 0) { return ,$parsed }
+    return $parsed
+}
+
+function ConvertFrom-PaginatedJson {
+    param([Parameter(Mandatory)][AllowNull()]$Raw)
+
+    if ($null -eq $Raw) { return $null }
+    $text = ($Raw | Out-String).Trim()
+    if ([string]::IsNullOrWhiteSpace($text)) { return $null }
+    try { $pages = @($text | ConvertFrom-Json) } catch { return $null }
+
+    $items = [System.Collections.Generic.List[object]]::new()
+    foreach ($page in $pages) {
+        foreach ($item in @($page)) {
+            if ($null -ne $item) { $items.Add($item) }
+        }
+    }
+    if ($items.Count -eq 0) { return ,@() }
+    return @($items)
+}
+
+function Get-DependabotPullRequests {
+    param([Parameter(Mandatory)][string]$Slug)
+
+    $raw = Invoke-Gh @('api', "repos/$Slug/pulls?state=open&per_page=100", '--paginate',
+        '--slurp') -AllowFailure
+    $items = ConvertFrom-PaginatedJson -Raw $raw
+    if ($null -eq $items -and $null -ne $raw) {
+        $script:lastGhError = 'GitHub returned unreadable pull-request JSON'
+    }
+    if ($null -eq $items) { return $null }
+    $parsed = @($items | Where-Object {
+        (Get-Prop $_ @('user', 'login') '') -eq 'dependabot[bot]'
+    } | ForEach-Object {
+        [pscustomobject]@{
+            number      = Get-Prop $_ @('number')
+            title       = Get-Prop $_ @('title') ''
+            body        = Get-Prop $_ @('body') ''
+            headRefName = Get-Prop $_ @('head', 'ref') ''
+        }
+    })
+    if (@($parsed).Count -eq 0) { return ,@() }
+    return $parsed
+}
+
+function Get-DependabotAlerts {
+    param(
+        [Parameter(Mandatory)][string]$Slug,
+        [Parameter(Mandatory)][string]$State
+    )
+
+    $raw = Invoke-Gh @('api', "repos/$Slug/dependabot/alerts?state=$State&per_page=100",
+        '--paginate', '--slurp') -AllowFailure
+    $parsed = ConvertFrom-PaginatedJson -Raw $raw
+    if ($null -eq $parsed -and $null -ne $raw) {
+        $script:lastGhError = 'GitHub returned unreadable Dependabot alert JSON'
+    }
+    if (@($parsed).Count -eq 0) { return ,@() }
+    return $parsed
 }
 
 # StrictMode throws on property access through a $null, and the GitHub payload has
@@ -268,15 +380,42 @@ function Get-SecurityUpdateState {
 
     $raw = Invoke-Gh @('api', "repos/$Slug/automated-security-fixes") -AllowFailure
     if (-not $raw) { return 'unknown' }
-    try { $j = ($raw | Out-String | ConvertFrom-Json) } catch { return 'unknown' }
+    try { $j = ($raw | Out-String | ConvertFrom-Json) } catch {
+        $script:lastGhError = 'GitHub returned unreadable automated-security-fixes JSON'
+        return 'unknown'
+    }
     if (-not $j.enabled) { return 'DISABLED' }
     if ($j.paused)       { return 'PAUSED' }
     return 'on'
 }
 
+function Get-SecurityUpdateClassification {
+    param([Parameter(Mandatory)][string]$State)
+
+    switch ($State.ToUpperInvariant()) {
+        'ON'       { return 'healthy' }
+        'DISABLED' { return 'unhealthy' }
+        'PAUSED'   { return 'unhealthy' }
+        default    { return 'unknown' }
+    }
+}
+
+function Add-UnmatchedAlert {
+    param(
+        [Parameter(Mandatory)]$Row,
+        [Parameter(Mandatory)][int]$AgeHours,
+        [Parameter(Mandatory)][int]$GraceHours,
+        [Parameter(Mandatory)]$Findings,
+        [Parameter(Mandatory)]$Graced
+    )
+
+    if ($AgeHours -lt $GraceHours) { $Graced.Add($Row) } else { $Findings.Add($Row) }
+}
+
 # --- main --------------------------------------------------------------------
 $now = (Get-Date).ToUniversalTime()
 $findings = [System.Collections.Generic.List[object]]::new()
+$graced   = [System.Collections.Generic.List[object]]::new()
 $skipped  = [System.Collections.Generic.List[object]]::new()
 $secWarnings = [System.Collections.Generic.List[object]]::new()
 $script:examined = 0
@@ -290,14 +429,16 @@ foreach ($slug in $repos) {
     # A repo with alerts disabled, or one this token cannot read, is NOT the same as a
     # repo with zero alerts, and must never be reported as clean. It is recorded as
     # skipped and surfaced separately.
-    $alertsRaw = Invoke-Gh @('api', '--paginate',
-        "repos/$slug/dependabot/alerts?state=$AlertState&per_page=100") -AllowFailure
-    if ($null -eq $alertsRaw) {
-        $skipped.Add([pscustomobject]@{ Repo = $slug; Reason = 'alerts unreadable (disabled, or token lacks security_events)' })
+    $alerts = Get-DependabotAlerts -Slug $slug -State $AlertState
+    if ($null -eq $alerts) {
+        $skipped.Add([pscustomobject]@{
+            Repo = $slug
+            Reason = Get-NotCheckedReason `
+                -Reason 'alerts unreadable (disabled, or token lacks security_events)'
+        })
         continue
     }
 
-    try { $alerts = @($alertsRaw | Out-String | ConvertFrom-Json) } catch { $alerts = @() }
     $alerts = @($alerts | Where-Object { $null -ne $_ -and $null -ne $_.number })
     if ($alerts.Count -eq 0) { continue }
     # NB: the examined counter is incremented only AFTER the PR list is known to be
@@ -306,21 +447,14 @@ foreach ($slug in $repos) {
 
     # Only fetched when the repo actually has open alerts — most repos have none, and
     # this keeps the sweep to roughly one call per repo in the common case.
-    # Paginated via the REST API: `gh pr list --limit 100` silently caps at 100, and
-    # every Dependabot PR past the cap would be invisible, so its alerts would report
-    # as uncovered while a fix was in flight. The author filter is applied locally
-    # because the pulls endpoint has none.
-    $prsRaw = Invoke-Gh @('api', '--paginate',
-        "repos/$slug/pulls?state=open&per_page=100") -AllowFailure
-    $allPrs = ConvertFrom-PrListJson -Raw $prsRaw
-    $prs = if ($null -eq $allPrs) { $null }
-           else { ,@($allPrs | Where-Object { (Get-Prop $_ @('user', 'login') '') -eq 'dependabot[bot]' }) }
+    $prs = Get-DependabotPullRequests -Slug $slug
     if ($null -eq $prs) {
         # Cannot reconcile this repo: with no PR list, every alert would report as
         # uncovered. Say so instead of emitting rows that look like findings.
         $skipped.Add([pscustomobject]@{
             Repo   = $slug
-            Reason = "has $($alerts.Count) $AlertState alert(s) but the Dependabot PR list was unreadable - NOT reconciled"
+            Reason = Get-NotCheckedReason -Reason `
+                "has $($alerts.Count) $AlertState alert(s) but the Dependabot PR list was unreadable - NOT reconciled"
         })
         continue
     }
@@ -334,16 +468,14 @@ foreach ($slug in $repos) {
     # every finding row (raised in review of PR #59). It stays on the object for the
     # -Json consumer, where a row is the natural unit.
     $secState = Get-SecurityUpdateState -Slug $slug
-    # Unreadable is not unhealthy: 'unknown' means the state could not be READ, which
-    # is a NOT CHECKED row — listing it beside a confirmed DISABLED/PAUSED would
-    # report an unread fact as a health finding.
-    if ($secState -eq 'unknown') {
-        $skipped.Add([pscustomobject]@{
-            Repo   = $slug
-            Reason = 'security-updates state unreadable - not health-checked'
-        })
-    } elseif ($secState -ne 'on') {
+    $secClassification = Get-SecurityUpdateClassification -State $secState
+    if ($secClassification -eq 'unhealthy') {
         $secWarnings.Add([pscustomobject]@{ Repo = $slug; SecurityUpdates = $secState })
+    } elseif ($secClassification -eq 'unknown') {
+        $skipped.Add([pscustomobject]@{
+            Repo = $slug
+            Reason = Get-NotCheckedReason -Reason 'automated security update health UNKNOWN'
+        })
     }
 
     foreach ($a in $alerts) {
@@ -360,17 +492,20 @@ foreach ($slug in $repos) {
 
         $target = Get-AlertTarget -Alert $a
         $match = $prs | Where-Object {
-            (Test-DependabotPrCoversPackage -Body ([string]$_.body) -PackageName ([string]$pkg)) -and
-            (Test-DependabotPrTargetsAlert -Pr $_ -AlertTarget $target)
+            Test-DependabotPrCoversPackage -Body ([string]$_.body) -PackageName ([string]$pkg) `
+                -HeadRefName ([string](Get-Prop $_ @('headRefName') '')) `
+                -ManifestPath ([string](Get-Prop $a @('dependency', 'manifest_path') '')) `
+                -Ecosystem ([string](Get-Prop $a @('dependency', 'package', 'ecosystem') '')) `
+                -RequireTargetContext
         } | Select-Object -First 1
 
         if ($match) { continue }
-        if ($ageHours -lt $GraceHours) { continue }
 
-        $findings.Add([pscustomobject]@{
+        $row = [pscustomobject]@{
             Repo         = $slug
             Alert        = Get-Prop $a @('number')
             Package      = $pkg
+            Ecosystem    = Get-Prop $a @('dependency', 'package', 'ecosystem') ''
             Severity     = Get-Prop $a @('security_advisory', 'severity') 'unknown'
             AgeDays      = if ($ageHours -eq [int]::MaxValue) { 'unknown' } else { [math]::Round($ageHours / 24, 1) }
             Scope        = Get-Prop $a @('dependency', 'scope') ''
@@ -381,7 +516,9 @@ foreach ($slug in $repos) {
             FirstPatched = Get-Prop $a @('security_vulnerability', 'first_patched_version', 'identifier') 'none'
             SecUpdates   = $secState
             Url          = Get-Prop $a @('html_url') ''
-        })
+        }
+        Add-UnmatchedAlert -Row $row -AgeHours $ageHours -GraceHours $GraceHours `
+            -Findings $findings -Graced $graced
     }
 }
 
@@ -389,6 +526,7 @@ $rank = @{ critical = 0; high = 1; medium = 2; moderate = 2; low = 3 }
 $sorted = @($findings | Sort-Object `
     @{ Expression = { if ($rank.ContainsKey([string]$_.Severity)) { $rank[[string]$_.Severity] } else { 9 } } }, `
     @{ Expression = { if ($_.AgeDays -eq 'unknown') { [double]::MaxValue } else { [double]$_.AgeDays } }; Descending = $true })
+$gracedSorted = @($graced | Sort-Object Repo, Alert)
 
 if ($Json) {
     [pscustomobject]@{
@@ -398,6 +536,7 @@ if ($Json) {
         reposChecked = $repos.Count
         alertsExamined = $script:examined
         findings     = $sorted
+        gracedUnmatched = $gracedSorted
         securityUpdatesNotHealthy = @($secWarnings)
         skipped      = @($skipped)
     } | ConvertTo-Json -Depth 6
@@ -420,14 +559,21 @@ if ($sorted.Count -eq 0) {
 } else {
     # A table, not prose: every row here is something a human must action by hand.
     $sorted | Format-Table -AutoSize `
-        Repo, Alert, Package, Severity, AgeDays, Scope, FirstPatched | Out-String
+        Repo, Alert, Package, Ecosystem, Manifest, Severity, AgeDays, Scope, FirstPatched | Out-String
     ''
-    "Each row is a $AlertState alert with no open Dependabot PR naming that package in that"
-    'directory/ecosystem. Dependabot may have decided no fix exists -- or decided that WRONGLY. Those are'
+    'Each row is an alert with no open Dependabot PR matching its package and target context.'
+    'Dependabot may have decided no fix exists -- or decided that WRONGLY. Those are'
     'indistinguishable from outside, so read the update-job log by hand:'
     '  Insights > Dependency graph > Dependabot > the ecosystem row > Last checked'
     'Before accepting a "cannot update" verdict, read what the PARENT actually declares:'
     '  a caret or tilde range spanning the patched version means a lockfile-only bump works.'
+}
+
+if ($gracedSorted.Count -gt 0) {
+    ''
+    "GRACED UNMATCHED ALERTS (younger than ${GraceHours}h; not findings yet):"
+    $gracedSorted | Format-Table -AutoSize `
+        Repo, Alert, Package, Ecosystem, Manifest, Severity, AgeDays | Out-String
 }
 
 if ($secWarnings.Count -gt 0) {

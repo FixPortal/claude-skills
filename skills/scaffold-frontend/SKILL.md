@@ -131,6 +131,10 @@ record the assumption).
   `tsconfig.test.json` — bundler mode, strict, `target`/`lib` es2023. The test
   project owns `*.test.*`/`*.spec.*`/`*.archunit.*` and `src/test/**`, so test
   sources are type-checked by `tsc -b` instead of belonging to no project.
+- Verify each resolved config with
+  `npm exec --silent --yes --package=typescript@<version> --call "tsc --showConfig --project <config>"`.
+  `--call` avoids npm-version-specific argument separator handling; reject empty
+  output before parsing JSON.
 - `templates/src/test/setup.ts` — jest-dom matchers + explicit RTL cleanup
   (needed because globals are off). Add project-specific shims below the core.
 
@@ -165,20 +169,9 @@ files, both in `templates/src/`:
 
 ### Why the wrapper (do not "just import archunit")
 
-Importing the package root (`archunit`) throws at import time under Vitest
-`globals: false` — it eagerly registers a custom matcher needing a global
-`expect`. This scaffold runs without globals, so the wrapper deep-imports the
-compiled subpath `archunit/dist/src/files`, which skips that side-effect. That
-subpath is dist-internal (`archunit` ships no `exports` map), so `archunit` is
-pinned to an **exact** version, and the wrapper centralises both the deep import
-and the pin to one line for clean upgrades.
-
-A 2026-06 cross-vendor adversarial review verified that the upstream fix is a
-**major-version change**, not a drive-by patch (the candidate behavioural fix
-shipped a non-functional advertised opt-in; the candidate `exports` map was
-itself breaking). So the wrapper is the pragmatic stance — not a fork, not a
-speculative PR. When upstream fixes the root throw or ships an `exports` map,
-only the wrapper changes.
+The package-root failure and upstream history are in
+[references/archunitts.md](references/archunitts.md). The executable invariant is:
+pin `archunit` exactly and import `projectFiles` only through the shipped wrapper.
 
 ### Authoring the rules
 
