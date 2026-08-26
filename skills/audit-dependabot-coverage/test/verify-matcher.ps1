@@ -17,30 +17,42 @@ param()
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-# Source the matcher without running the sweep. Dot-sourcing reconcile.ps1 would
-# execute it, so the function is extracted and re-defined here from the same file --
-# guarded by a check that it still exists, so this test fails loudly if the function
-# is renamed rather than silently testing a stale copy.
+# Source functions without running the sweep. PowerShell's parser owns function
+# boundaries; regex extraction truncates nested or deliberately reformatted bodies.
 $script:reconcile = Join-Path (Split-Path -Parent $PSScriptRoot) 'reconcile.ps1'
 if (-not (Test-Path $script:reconcile)) { throw "reconcile.ps1 not found at $script:reconcile" }
 
-$src = $script:reconcile
-# Extract each function via the AST, not a regex window. A non-greedy regex stopping
-# at the first line-initial '}' only works while every internal brace happens to be
-# indented: a here-string, a nested scriptblock or a reformat truncates the extraction,
-# and `if (-not $m.Success)` catches only total non-match -- so the truncated body would
-# dot-source as a DIFFERENT function than the one that ships. A guard whose scope
-# depends on formatting is not a guard. Same fix as verify-pruned-traversal.ps1.
+$tokens = $null
 $parseErrors = $null
-$ast = [System.Management.Automation.Language.Parser]::ParseFile($src, [ref]$null, [ref]$parseErrors)
-if ($parseErrors) { throw "reconcile.ps1 does not parse: $($parseErrors[0].Message)" }
-foreach ($fn in @('Test-DependabotPrCoversPackage', 'ConvertFrom-PrListJson', 'Get-Prop',
-                  'Get-AlertTarget', 'Test-DependabotPrTargetsAlert', 'Get-RepoList')) {
-    $def = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $fn }, $true)
-    if (-not $def) {
-        throw "Could not extract $fn from reconcile.ps1 - was it renamed?"
+$ast = [System.Management.Automation.Language.Parser]::ParseFile(
+    $script:reconcile, [ref]$tokens, [ref]$parseErrors)
+if ($parseErrors.Count -gt 0) { throw ($parseErrors | Out-String) }
+
+$requiredFunctions = @(
+    'Test-DependabotPrCoversPackage'
+    'ConvertFrom-PrListJson'
+    'ConvertFrom-PaginatedJson'
+    'Get-Prop'
+    'Invoke-Gh'
+    'Get-NotCheckedReason'
+    'Get-RepoList'
+    'Get-DependabotPullRequests'
+    'Get-DependabotAlerts'
+    'Get-SecurityUpdateClassification'
+    'Add-UnmatchedAlert'
+)
+$missingFunctions = @()
+foreach ($fn in $requiredFunctions) {
+    $node = $ast.FindAll({
+        param($candidate)
+        $candidate -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+            $candidate.Name -eq $fn
+    }, $true) | Select-Object -First 1
+    if ($null -eq $node) {
+        $missingFunctions += $fn
+        continue
     }
-    . ([scriptblock]::Create($def.Extent.Text))
+    . ([scriptblock]::Create($node.Extent.Text))
 }
 
 $fail = 0
@@ -48,10 +60,34 @@ function ok  { param($m) "ok   $m" }
 function bad { param($m) $script:fail = 1; "FAIL $m" }
 
 function Assert-Match {
-    param([string]$Body, [string]$Pkg, [bool]$Expected, [string]$Label)
-    $got = Test-DependabotPrCoversPackage -Body $Body -PackageName $Pkg
+    param(
+        [string]$Body,
+        [string]$Pkg,
+        [bool]$Expected,
+        [string]$Label,
+        [string]$HeadRefName,
+        [string]$ManifestPath,
+        [string]$Ecosystem,
+        [switch]$RequireTargetContext
+    )
+    try {
+        $parameters = @{
+            Body = $Body
+            PackageName = $Pkg
+            HeadRefName = $HeadRefName
+            ManifestPath = $ManifestPath
+            Ecosystem = $Ecosystem
+        }
+        if ($RequireTargetContext) { $parameters.RequireTargetContext = $true }
+        $got = Test-DependabotPrCoversPackage @parameters
+    } catch {
+        bad "$Label ($($_.Exception.Message))"
+        return
+    }
     if ($got -eq $Expected) { ok $Label } else { bad "$Label (want $Expected, got $got)" }
 }
+
+foreach ($fn in $missingFunctions) { bad "required production function exists: $fn" }
 
 # --- real fixture: single-dep PR #196 ---------------------------------------
 # Verbatim first line of the real body, plus the commit list that follows it.
@@ -136,6 +172,49 @@ Assert-Match -Body '' -Pkg 'nanoid' -Expected $false `
     -Label 'an empty body covers nothing'
 Assert-Match -Body $single -Pkg '' -Expected $false `
     -Label 'an empty package name matches nothing'
+
+# --- manifest and ecosystem identity ---------------------------------------
+$webGrouped = @'
+Bumps the npm-minor-and-patch group with 1 update in the /web directory:
+Updates `nanoid` from 3.3.16 to 3.3.18
+'@
+$webBranch = 'dependabot/npm_and_yarn/web/npm-minor-and-patch-abc123'
+
+Assert-Match -Body $webGrouped -Pkg 'nanoid' -HeadRefName $webBranch `
+    -ManifestPath 'web/package-lock.json' -Ecosystem 'npm' -Expected $true `
+    -Label 'same package, manifest directory, and ecosystem is covered'
+Assert-Match -Body $webGrouped -Pkg 'nanoid' -HeadRefName $webBranch `
+    -ManifestPath 'api/package-lock.json' -Ecosystem 'npm' -Expected $false `
+    -Label 'same package in a different manifest directory stays unmatched'
+Assert-Match -Body $webGrouped -Pkg 'nanoid' -HeadRefName $webBranch `
+    -ManifestPath 'web/packages.lock.json' -Ecosystem 'nuget' -Expected $false `
+    -Label 'same package in a different ecosystem stays unmatched'
+Assert-Match -Body $webGrouped -Pkg 'nanoid' -HeadRefName '' `
+    -ManifestPath 'web/package-lock.json' -Ecosystem 'npm' -Expected $false `
+    -Label 'missing PR target context stays unmatched rather than guessing'
+Assert-Match -Body $webGrouped -Pkg 'nanoid' -HeadRefName $webBranch `
+    -ManifestPath '' -Ecosystem '' -RequireTargetContext -Expected $false `
+    -Label 'missing alert target context stays unmatched in reconciliation mode'
+
+$scopedSingle = 'Bumps [@azure/msal-browser](https://github.com/AzureAD/microsoft-authentication-library-for-js) from 5.17.3 to 5.18.0.'
+Assert-Match -Body $scopedSingle -Pkg '@azure/msal-browser' `
+    -HeadRefName 'dependabot/npm_and_yarn/web/azure-msal-browser-5.18.0' `
+    -ManifestPath 'web/package-lock.json' -Ecosystem 'npm' -Expected $true `
+    -Label 'scoped npm package matches Dependabot single-dependency branch normalization'
+
+$singleApi = 'Bumps [api](https://example.invalid/api) from 1.0.0 to 1.0.1.'
+Assert-Match -Body $singleApi -Pkg 'api' `
+    -HeadRefName 'dependabot/npm_and_yarn/api-service/api-2' `
+    -ManifestPath 'package-lock.json' -Ecosystem 'npm' -Expected $false `
+    -Label 'a directory prefix shaped like the package cannot cover the root manifest'
+
+$caseVariantGrouped = @'
+Bumps the npm-minor-and-patch group with 1 update in the /Web directory:
+Updates `nanoid` from 3.3.16 to 3.3.18
+'@
+Assert-Match -Body $caseVariantGrouped -Pkg 'nanoid' -HeadRefName $webBranch `
+    -ManifestPath 'web/package-lock.json' -Ecosystem 'npm' -Expected $false `
+    -Label 'manifest directory identity is case-sensitive'
 
 # --- unreadable PR list must NOT read as "no PRs" ---------------------------
 # THE FALSE-POSITIVE FLOOD PATH, and the one my own validation could not have caught.
@@ -230,69 +309,144 @@ $implicit = Get-Prop $alertLike @('nope')
 if ($null -eq $implicit) { ok 'a missing property with no Default yields $null' }
 else { bad "a missing property with no Default yields `$null (got '$implicit')" }
 
-# --- directory + ecosystem agreement -------------------------------------------
-# A package-name body match is not coverage in a monorepo: a PR bumping a package in
-# /web must not mark the same package's /api alert covered. The PR's target comes
-# from its branch (dependabot/<ecosystem>/<directory...>/<update>); when it cannot
-# be established, the alert stays unmatched -- unresolvable is not covered.
-$alertWeb = Get-AlertTarget -Alert ('{"dependency":{"manifest_path":"web/package-lock.json","package":{"ecosystem":"npm"}}}' | ConvertFrom-Json)
-$alertApi = Get-AlertTarget -Alert ('{"dependency":{"manifest_path":"api/package-lock.json","package":{"ecosystem":"npm"}}}' | ConvertFrom-Json)
-$prWeb   = '{"head":{"ref":"dependabot/npm_and_yarn/web/npm-minor-and-patch-eff5aeb2ab"}}' | ConvertFrom-Json
-$prRoot  = '{"head":{"ref":"dependabot/npm_and_yarn/brace-expansion-5.0.9"}}' | ConvertFrom-Json
-$prNuget = '{"head":{"ref":"dependabot/nuget/web/Scalar.AspNetCore-2.16.18"}}' | ConvertFrom-Json
-$prOdd   = '{"head":{"ref":"feature/no-dependabot-shape"}}' | ConvertFrom-Json
-
-function Assert-Target {
-    param($Pr, $Target, [bool]$Expected, [string]$Label)
-    $got = Test-DependabotPrTargetsAlert -Pr $Pr -AlertTarget $Target
-    if ($got -eq $Expected) { ok $Label } else { bad "$Label (want $Expected, got $got)" }
+# --- enumeration is paginated, not capped ----------------------------------
+$productionInvokeGh = (Get-Command Invoke-Gh).ScriptBlock
+$script:capturedGhArguments = @()
+function Invoke-Gh {
+    param([string[]]$Arguments, [switch]$AllowFailure)
+    $script:capturedGhArguments = $Arguments
+    return @(1..201 | ForEach-Object { "YourOrg/repo-$_" })
 }
 
-Assert-Target -Pr $prWeb -Target $alertWeb -Expected $true `
-    -Label 'a PR targets the directory and ecosystem its branch names'
-Assert-Target -Pr $prWeb -Target $alertApi -Expected $false `
-    -Label 'a /web PR does NOT cover the same package alert in /api'
-Assert-Target -Pr $prRoot -Target (Get-AlertTarget -Alert ('{"dependency":{"manifest_path":"package-lock.json","package":{"ecosystem":"npm"}}}' | ConvertFrom-Json)) -Expected $true `
-    -Label 'a root single-dep branch targets the root manifest'
-Assert-Target -Pr $prNuget -Target $alertWeb -Expected $false `
-    -Label 'an npm alert is not covered by a nuget PR in the same directory'
-Assert-Target -Pr $prOdd -Target $alertWeb -Expected $false `
-    -Label 'a non-Dependabot branch shape is unresolvable, not covered'
-if ($null -eq (Get-AlertTarget -Alert ('{"dependency":{"package":{"ecosystem":"npm"}}}' | ConvertFrom-Json))) {
-    ok 'an alert without a manifest path has no establishable target'
+$repos = @(Get-RepoList -Orgs @('YourOrg') -Explicit @())
+if ($repos.Count -eq 201) { ok 'repository enumeration retains a result beyond the old 200 cap' }
+else { bad "repository enumeration retains a result beyond the old 200 cap (got $($repos.Count))" }
+if ($script:capturedGhArguments -contains '--paginate' -and
+    $script:capturedGhArguments -notcontains '--limit') {
+    ok 'repository enumeration requests every page without a numeric cap'
 } else {
-    bad 'an alert without a manifest path has no establishable target'
+    bad "repository enumeration requests every page without a numeric cap ($($script:capturedGhArguments -join ' '))"
+}
+Set-Item -Path Function:\Invoke-Gh -Value $productionInvokeGh
+
+if (Get-Command Get-DependabotPullRequests -ErrorAction SilentlyContinue) {
+    $script:capturedGhArguments = @()
+    function Invoke-Gh {
+        param([string[]]$Arguments, [switch]$AllowFailure)
+        $script:capturedGhArguments = $Arguments
+        $items = @(1..101 | ForEach-Object {
+            [pscustomobject]@{
+                number = $_
+                title = "Bump package-$_"
+                body = "Bumps [package-$_](https://example.invalid) from 1 to 2."
+                user = [pscustomobject]@{ login = 'dependabot[bot]' }
+                head = [pscustomobject]@{ ref = "dependabot/npm_and_yarn/package-$_-2" }
+            }
+        })
+        $pages = [object[]]::new(2)
+        $pages[0] = @($items[0..99])
+        $pages[1] = @($items[100])
+        return ,($pages | ConvertTo-Json -Depth 4 -Compress)
+    }
+    $prs = @(Get-DependabotPullRequests -Slug 'YourOrg/example')
+    if ($prs.Count -eq 101) { ok 'PR enumeration retains a result beyond the old 100 cap' }
+    else { bad "PR enumeration retains a result beyond the old 100 cap (got $($prs.Count))" }
+    if ($script:capturedGhArguments -contains '--paginate' -and
+        $script:capturedGhArguments -notcontains '--limit' -and
+        -not ($script:capturedGhArguments -contains '--slurp' -and
+            $script:capturedGhArguments -contains '--jq')) {
+        ok 'PR enumeration requests every page without a numeric cap or incompatible format flags'
+    } else {
+        bad "PR enumeration requests every page without a numeric cap or incompatible format flags ($($script:capturedGhArguments -join ' '))"
+    }
+    Set-Item -Path Function:\Invoke-Gh -Value $productionInvokeGh
 }
 
-# --- owner-type routing in Get-RepoList ----------------------------------------
-# -Org is documented to accept an organisation OR a user, but `orgs/{o}/repos` 404s on
-# a user owner. Get-RepoList must resolve the owner type first and pick the endpoint.
-# Invoke-Gh is stubbed so the routing is exercised offline; the stub records the args.
-$script:ghCalls = [System.Collections.Generic.List[object]]::new()
-function Invoke-Gh {
-    param([Parameter(Mandatory)][string[]]$Arguments, [switch]$AllowFailure)
-    $script:ghCalls.Add(@($Arguments))
-    if ($Arguments -contains '--paginate') { return @('acme/widget') }
-    return 'Organization'
-}
-$null = @(Get-RepoList -Orgs @('acme') -Explicit $null)
-$paginated = @($script:ghCalls | Where-Object { $_ -contains '--paginate' })
-if ($paginated.Count -eq 1 -and ($paginated[0] -join ' ') -match '^api --paginate orgs/acme/repos\?per_page=100') {
-    ok 'an Organization owner routes to orgs/{o}/repos'
-} else { bad "an Organization owner routes to orgs/{o}/repos (got '$($paginated | ForEach-Object { $_ -join ' ' })')" }
+# --- state query and classification -----------------------------------------
+if (Get-Command Get-DependabotAlerts -ErrorAction SilentlyContinue) {
+    $script:capturedGhArguments = @()
+    function Invoke-Gh {
+        param([string[]]$Arguments, [switch]$AllowFailure)
+        $script:capturedGhArguments = $Arguments
+        return '[[{"number":77,"state":"auto_dismissed"}]]'
+    }
+    $autoDismissed = @(Get-DependabotAlerts -Slug 'YourOrg/example' -State 'auto_dismissed')
+    if ($autoDismissed.Count -eq 1 -and $autoDismissed[0].state -eq 'auto_dismissed') {
+        ok 'auto_dismissed alerts are queried and returned'
+    } else { bad 'auto_dismissed alerts are queried and returned' }
+    if (($script:capturedGhArguments -join ' ') -match 'state=auto_dismissed' -and
+        $script:capturedGhArguments -contains '--paginate') {
+        ok 'auto_dismissed uses the paginated alert endpoint'
+    } else { bad "auto_dismissed uses the paginated alert endpoint ($($script:capturedGhArguments -join ' '))" }
 
-$script:ghCalls.Clear()
-function Invoke-Gh {
-    param([Parameter(Mandatory)][string[]]$Arguments, [switch]$AllowFailure)
-    $script:ghCalls.Add(@($Arguments))
-    if ($Arguments -contains '--paginate') { return @('someone/widget') }
-    return 'User'
+    function Invoke-Gh {
+        param([string[]]$Arguments, [switch]$AllowFailure)
+        $script:lastGhError = 'AUTH_DENIED'
+        return $null
+    }
+    $failedAlerts = Get-DependabotAlerts -Slug 'YourOrg/example' -State 'open'
+    if ($null -eq $failedAlerts) { ok 'a failed alert query is UNREADABLE, not an empty list' }
+    else { bad 'a failed alert query is UNREADABLE, not an empty list' }
+
+    function Invoke-Gh {
+        param([string[]]$Arguments, [switch]$AllowFailure)
+        return '[[]]'
+    }
+    $emptyAlerts = Get-DependabotAlerts -Slug 'YourOrg/example' -State 'open'
+    if ($null -ne $emptyAlerts -and @($emptyAlerts).Count -eq 0) {
+        ok 'a readable empty alert page remains distinct from API failure'
+    } else { bad 'a readable empty alert page remains distinct from API failure' }
+    Set-Item -Path Function:\Invoke-Gh -Value $productionInvokeGh
 }
-$null = @(Get-RepoList -Orgs @('someone') -Explicit $null)
-$paginated = @($script:ghCalls | Where-Object { $_ -contains '--paginate' })
-if ($paginated.Count -eq 1 -and ($paginated[0] -join ' ') -match '^api --paginate users/someone/repos\?per_page=100') {
-    ok 'a User owner routes to users/{o}/repos, not the 404ing orgs endpoint'
-} else { bad "a User owner routes to users/{o}/repos, not the 404ing orgs endpoint (got '$($paginated | ForEach-Object { $_ -join ' ' })')" }
+
+if (Get-Command Get-SecurityUpdateClassification -ErrorAction SilentlyContinue) {
+    if ((Get-SecurityUpdateClassification -State 'unknown') -eq 'unknown') {
+        ok 'UNKNOWN security-update state is not classified as unhealthy'
+    } else { bad 'UNKNOWN security-update state is not classified as unhealthy' }
+    if ((Get-SecurityUpdateClassification -State 'DISABLED') -eq 'unhealthy' -and
+        (Get-SecurityUpdateClassification -State 'PAUSED') -eq 'unhealthy') {
+        ok 'only confirmed disabled or paused states are unhealthy'
+    } else { bad 'only confirmed disabled or paused states are unhealthy' }
+}
+
+# --- failed APIs retain only bounded stderr ---------------------------------
+$script:lastGhError = $null
+function gh {
+    Write-Error ('AUTH_DENIED ' + ('x' * 700)) -ErrorAction Continue
+    $global:LASTEXITCODE = 1
+    'unsafe response body'
+}
+$failedApi = Invoke-Gh -Arguments @('api', 'repos/YourOrg/example/dependabot/alerts') -AllowFailure
+$diagnostic = if (Get-Variable -Name lastGhError -Scope Script -ErrorAction SilentlyContinue) {
+    [string]$script:lastGhError
+} else { '' }
+if ($null -eq $failedApi) { ok 'a failed API call returns no successful payload' }
+else { bad 'a failed API call returns no successful payload' }
+if ($diagnostic -match 'AUTH_DENIED' -and $diagnostic.Length -le 512 -and
+    $diagnostic -notmatch 'unsafe response body') {
+    ok 'a failed API call retains bounded stderr without trusting stdout'
+} else { bad "a failed API call retains bounded stderr without trusting stdout (length $($diagnostic.Length))" }
+if (Get-Command Get-NotCheckedReason -ErrorAction SilentlyContinue) {
+    $reason = Get-NotCheckedReason -Reason 'alerts unreadable'
+    if ($reason -match '^alerts unreadable: .*AUTH_DENIED' -and $reason.Length -le 531) {
+        ok 'NOT CHECKED reason carries the bounded API diagnostic'
+    } else { bad "NOT CHECKED reason carries the bounded API diagnostic ($reason)" }
+}
+Remove-Item -Path Function:\gh
+
+# --- grace is an explicit per-alert ledger ----------------------------------
+if (Get-Command Add-UnmatchedAlert -ErrorAction SilentlyContinue) {
+    $findingRows = [System.Collections.Generic.List[object]]::new()
+    $gracedRows = [System.Collections.Generic.List[object]]::new()
+    Add-UnmatchedAlert -Row ([pscustomobject]@{ Alert = 10 }) -AgeHours 1 -GraceHours 48 `
+        -Findings $findingRows -Graced $gracedRows
+    Add-UnmatchedAlert -Row ([pscustomobject]@{ Alert = 11 }) -AgeHours 47 -GraceHours 48 `
+        -Findings $findingRows -Graced $gracedRows
+    if ($findingRows.Count -eq 0 -and $gracedRows.Count -eq 2 -and
+        $gracedRows[0].Alert -eq 10 -and $gracedRows[1].Alert -eq 11) {
+        ok 'every graced unmatched alert remains individually visible'
+    } else { bad 'every graced unmatched alert remains individually visible' }
+}
 
 # --- red check --------------------------------------------------------------
 # A suite that cannot fail is not a suite. This asserts a deliberately false

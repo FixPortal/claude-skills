@@ -1,6 +1,7 @@
 $ErrorActionPreference = 'Stop'
 $root = Join-Path $PSScriptRoot '..'
 $main = Get-Content (Join-Path $root 'SKILL.md') -Raw
+$normalizedMain = $main -replace '\s+', ' '
 $driver = Get-Content (Join-Path $root 'run-review.ps1') -Raw
 $manifest = Get-Content (Join-Path $root 'reviewers.json') -Raw | ConvertFrom-Json
 $methodology = Get-Content (Join-Path $root 'docs' 'METHODOLOGY-v2.md') -Raw
@@ -9,6 +10,62 @@ $gemini = Get-Content (Join-Path $root 'gemini-review.ps1') -Raw
 $aggregate = Get-Content (Join-Path $root 'aggregate-and-emit.ps1') -Raw
 $codex = Get-Content (Join-Path $root 'codex-review.ps1') -Raw
 $openai = Get-Content (Join-Path $root 'openai-review.ps1') -Raw
+
+# Telemetry decisions are controller-owned; methodology retains rationale only.
+foreach ($needle in 'every manifest-derived participant plus the judge',
+                    'Multi-chunk runs use `aggregate-and-emit.ps1`',
+                    'call `emit-review-telemetry.ps1` after Phase 4',
+                    'work directory''s `-RunId`',
+                    'Include `Role`',
+                    '(runId, reviewer, role)',
+                    "vendor's own Phase-1 findings",
+                    'derive ownership from pooled provenance',
+                    'never let accepted exceed raised',
+                    'canonical model registry',
+                    'preserve `costUnknown=true`',
+                    'render `UNKNOWN`',
+                    'Disclose every metered fallback') {
+    if ($normalizedMain -notmatch [regex]::Escape($needle)) {
+        throw "SKILL.md is missing its controller-owned telemetry rule: $needle"
+    }
+}
+foreach ($duplicatedRule in '(?m)^- Emit one row',
+                            '(?m)^- `IssuesAccepted` credits',
+                            '(?m)^- Resolve moving aliases') {
+    if ($methodology -match $duplicatedRule) {
+        throw "METHODOLOGY-v2.md duplicates a controller-owned telemetry imperative: $duplicatedRule"
+    }
+}
+
+# Cost policy belongs only to SKILL.md. Match the live semantic rule rather than a
+# Markdown shape so moving it from a bullet into prose cannot bypass this ownership
+# check. Historical explanation may mention the registry or unknown-cost state alone;
+# it fails only when it restates the operative lookup/preservation relationship.
+$duplicatedCostPolicies = [ordered]@{
+    'canonical-registry lookup' = '(?is)(?:(?:prices?|model aliases?).{0,100}(?:come only from|must (?:be )?resolve(?:d)? (?:only )?(?:through|from)|are resolve(?:d)? (?:only )?(?:through|from))|resolve(?: moving)? (?:model aliases and )?prices? (?:only )?(?:through|from)).{0,80}canonical model registry'
+    'unknown-cost preservation' = '(?is)(?:absent|missing|unresolved) prices?.{0,100}(?:remains?|must (?:remain|be preserved|be set)|is (?:preserved|set)).{0,80}costUnknown=true.{0,140}(?:renders?|must render|is rendered).{0,60}UNKNOWN'
+}
+foreach ($entry in $duplicatedCostPolicies.GetEnumerator()) {
+    if ($methodology -match $entry.Value) {
+        throw "METHODOLOGY-v2.md duplicates the controller-owned $($entry.Key) rule"
+    }
+}
+foreach ($liveRule in 'Prices come only from the canonical model registry.',
+                      'Resolve moving model aliases and prices through the canonical model registry.',
+                      'An absent price remains costUnknown=true and renders UNKNOWN.',
+                      'Missing prices must be preserved as costUnknown=true and must render UNKNOWN.') {
+    if (-not ($duplicatedCostPolicies.Values | Where-Object { $liveRule -match $_ })) {
+        throw "The semantic duplication guard misses a live cost-policy restatement: $liveRule"
+    }
+}
+foreach ($historical in 'In v2, prices were resolved only through the canonical model registry.',
+                        'An absent price was preserved as costUnknown=true and rendered UNKNOWN in the v2 design.') {
+    foreach ($entry in $duplicatedCostPolicies.GetEnumerator()) {
+        if ($historical -match $entry.Value) {
+            throw "The $($entry.Key) guard incorrectly rejects historical rationale: $historical"
+        }
+    }
+}
 
 # A smell alarm, not the contract. What must not happen is prompt bodies and roster
 # facts being mirrored here, and the needle checks below enforce that DIRECTLY - this

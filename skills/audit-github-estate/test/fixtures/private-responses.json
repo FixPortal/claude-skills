@@ -1,0 +1,24 @@
+{
+  "default_branch_sha": "2222222222222222222222222222222222222222",
+  "repository": {
+    "exit_code": 0,
+    "http_status": 200,
+    "body_json": "{\"full_name\":\"example/private-repo\",\"visibility\":\"private\",\"owner\":{\"type\":\"Organization\"},\"security_and_analysis\":{\"code_security\":{\"status\":\"disabled\"},\"secret_scanning\":{\"status\":\"disabled\"},\"secret_scanning_push_protection\":{\"status\":\"disabled\"},\"secret_scanning_non_provider_patterns\":{\"status\":\"disabled\"},\"secret_scanning_validity_checks\":{\"status\":\"disabled\"}}}"
+  },
+  "actions_run": {
+    "exit_code": 0,
+    "http_status": 200,
+    "body_json": "{\"head_sha\":\"2222222222222222222222222222222222222222\",\"conclusion\":\"success\"}"
+  },
+  "code_quality_setup": {
+    "exit_code": 0,
+    "http_status": 200,
+    "body_json": "{\"state\":\"not-configured\"}"
+  },
+  "code_security_configuration": {
+    "exit_code": 0,
+    "http_status": 204,
+    "body_json": ""
+  },
+  "code_quality_org_access": "UNVERIFIED"
+}

@@ -33,7 +33,8 @@ Join discovery to collector rows by canonical `resolvedPath`. Git fields are
 nested under `.git`: `.git.boundarySha`, `.git.effectiveNeverReviewed`,
 `.git.sinceReviewCount`, `.git.sinceReviewFiles`, `.git.sinceReviewIns`,
 `.git.sinceReviewDel`, and `.git.daysSinceReview`; `hasTrackedSource` is a
-top-level field.
+top-level field. Consume the top-level `scopeValidation` and `subsystemPaths`
+exactly as emitted; do not recreate pathspec validation.
 
 Each discovered repo needs exactly one admissible row: `unresolved` and
 `outsideScanPath` false, `vault.isDocumentReview` false, and `resolvedPath`
@@ -45,13 +46,20 @@ Vault-only rows never create targets.
 recreate git-marker inference: a prose-only git marker is already emitted as
 full-history `effectiveNeverReviewed = true` by `review-digest`.
 
+Evaluate `scopeValidation` before `hasTrackedSource`. Only `none` (whole repo)
+and `valid` are usable scope states; any other value is unknown. An invalid
+declared scope stays UNKNOWN even if another field appears to say it is empty.
+
 | Evidence | Class | Action |
 |---|---|---|
-| `hasTrackedSource = false` | skip/void | Record not code-reviewable; do not audit |
-| `hasTrackedSource` missing or unknown | UNKNOWN | STOP before approval |
+| `scopeValidation = invalid` | UNKNOWN | STOP before approval; report the invalid declared subsystem paths |
+| `scopeValidation` missing or unrecognized | UNKNOWN | STOP before approval |
+| `scopeValidation = valid`; `hasTrackedSource = false` | skip/void | Record the validated scope as not code-reviewable; do not audit |
+| `scopeValidation = none`; `hasTrackedSource = false` | skip/void | Record the whole repo as not code-reviewable; do not audit |
+| usable scope state; `hasTrackedSource` missing or null | UNKNOWN | STOP before approval |
 | `hasTrackedSource = true`; `effectiveNeverReviewed = false`; boundary set; zero commits | skip | Record unchanged |
 | `hasTrackedSource = true`; `effectiveNeverReviewed = false`; boundary set; later commits | drift | Review `<boundarySha>..HEAD` |
-| `hasTrackedSource=true`; `effectiveNeverReviewed=true` | audit | Audit only the approved subsystem pathspec |
+| `hasTrackedSource=true`; `effectiveNeverReviewed=true` | audit | Audit only the approved `subsystemPaths` pathspecs |
 
 `sinceReviewFiles` is a file count, not a list. For drift candidates, run
 `git -C <repo> diff --name-only <boundarySha>..HEAD`; docs/assets/brand-only
@@ -74,7 +82,7 @@ the equivalent conversation checklist. Update it through compaction.
 Invoke `adversarial-review` sequentially:
 
 - drift: `<boundarySha>..HEAD`
-- audit: `audit -- <approved subsystem pathspec>`
+- audit: `audit -- <approved subsystem pathspecs>`
 
 Let each invocation own chunking, synthesis, and vault persistence. Do not
 report per target. At the end provide one row per repository with class,

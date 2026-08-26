@@ -127,11 +127,11 @@ Sub-backed calls are flat-rate, so **real per-token cost is ~0**. Telemetry
 therefore reports **putative cost** (the v1 treatment for Claude), computed from
 best-effort token counts extracted from each CLI's JSON output
 (`codex exec --json`, `kimi --output-format stream-json`, `claude -p
---output-format json`). Prices come only from the canonical model registry. An
-absent price remains `costUnknown=true` through aggregation and renders as
-`UNKNOWN`; it is never presented as a measured zero. When a CLI does not surface
-usage (including `agy`), tokens remain 0. Outcome telemetry (issuesRaised /
-issuesAccepted) is unaffected.
+--output-format json`). V2 added registry-backed pricing and an explicit
+unknown-cost state because unavailable pricing and zero marginal subscription spend are
+different facts. The live lookup and rendering policy now sits in `SKILL.md` beside the
+emission rules. Collectors recorded zero tokens when a CLI exposed no usage (including
+`agy`), without changing outcome telemetry (issuesRaised / issuesAccepted).
 
 ## Phase design
 
@@ -179,14 +179,13 @@ exactly as v1 (CONFIRMED / REFUTED / INDETERMINATE, additive annotations).
 
 ## Telemetry (Observatory)
 
-- Per-run outcome events: one per vendor participant + judge. v2 = **5 emits**
-  (anthropic merged B+F, openai, google, moonshot, + anthropic/judge).
-- `emit-review-telemetry.ps1` `-Reviewer` ValidateSet includes `moonshot`.
-- Observatory server: `Provider` includes `Moonshot`; the runs endpoint accepts
-  `reviewer=moonshot`; dashboard completeness is **4-vendors+judge**, with a
-  label/colour for Moonshot.
-- Cost for all sub-backed vendors is putative; the dashboard already renders
-  putative cost for subscription vendors.
+The controller owns the live emission, attribution, and unknown-cost rules. The
+Observatory schema was designed around participant-and-role identity because it upserts
+on `(runId, reviewer, role)`; a repeated identity replaces that row. Attribution was
+based on pooled Phase-1 provenance so the dashboard measures what each vendor found,
+not which consensus labels it later supported. Unknown-cost state exists separately
+from numeric cost because subscription usage and missing registry prices cannot safely
+be represented by the same zero.
 
 ## Files
 

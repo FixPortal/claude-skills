@@ -1,6 +1,6 @@
 ---
 name: audit-dotnet-estate
-description: Use when auditing or comparing multiple .NET/C# repositories for conformance with current house standards, including estate standardisation, scaffold drift, .slnx, <YourOrg.CodeStyle>, Roslyn or ReSharper warnings, CSharpier, tests, documentation, and CI.
+description: Use when auditing or comparing multiple .NET/C# repositories for integrated estate conformance across solution structure, shared code style, formatting, tests, documentation, and CI. Use audit-dotnet-analyzers for analyzer diagnostic or provenance investigations, audit-tests for test adequacy, and audit-ci for CI-only comparisons.
 ---
 
 # Audit .NET Estate
@@ -79,13 +79,22 @@ For each estate root:
    `.audit-worktrees`, `.worktrees`, `.claude`, `.codex`, `archive`, `archives`, `vendor`,
    `third_party`, `node_modules`, `bin`, or `obj`.
 3. Keep repositories containing `.slnx` or `.sln` anywhere in the tracked tree. A
-   `.sln`-only repository remains a candidate and fails the applicable `.slnx` rule.
+   `.sln`-only repository remains a candidate. Existing solution formats are conforming
+   unless migration is explicitly authorized by an applicable scoped instruction or ADR;
+   `.slnx` is required for new solutions and authorized migrations, not retroactively for
+   every existing repository.
 4. Ignore loose `.csproj` or C# files unless the user supplied that repository explicitly.
 5. List every excluded or skipped repository and the reason in the report. Never silently
    broaden the scan to archives, vendor trees, linked worktrees, or loose source.
 
 Record path, remote, branch, HEAD SHA, dirty state, solution files, SDK selection, and
 applicable scoped instructions before running checks.
+
+After discovering the solution format and findings, run
+`scripts/get-remediation-plan.ps1` with `SolutionFormat`,
+`SolutionMigrationAuthorized`, `CSharpierWidthMigration`, and `HasOtherFindings`.
+Use its `SolutionAction` for solution-format grading and its `PullRequests` unchanged when
+shaping remediation. Do not independently infer either policy in prose.
 
 ## Audit workflow
 
@@ -128,9 +137,10 @@ defect. Record that smallest cause without expanding into a general vulnerabilit
 test-adequacy review.
 
 Text presence is not configuration evidence. Ignore comments and examples, and verify an
-active assignment in an applicable section. For `.editorconfig`, use
-`scripts/get-editorconfig-assignment.ps1`; a commented value or one under an unrelated glob
-does not configure C#.
+active assignment in an applicable section. For `.editorconfig`, pass
+`scripts/get-editorconfig-assignment.ps1` a concrete tracked C# file and the key. The helper
+walks applicable nested files and returns the effective assignment with its source path and
+section; a commented value or one under an unrelated glob does not configure that file.
 
 ### 3. Run the smallest decisive checks
 
@@ -199,17 +209,16 @@ single report in the final response.
 Every remediation prompt must be copy-ready for a fresh agent and contain:
 
 ```markdown
-### Remediate <repository> in at most one PR
+### Remediate <repository>
 
 Repository: <absolute path>
 Audit snapshot: <HEAD SHA>
 Findings: <all finding IDs>
+Solution action: <the emitted SolutionAction>
+PR plan: <one ordered entry per emitted PullRequests item>
 
 #### Outcome
-Resolve every listed finding for this repository: at most one branch and one pull
-request, opened only where the fixes produce committed changes. Findings whose only
-defect is a GitHub setting (for example CodeQL default setup) are corrected by a
-separate API/UI disposition listed below — a settings-only repository gets no PR.
+Resolve every listed finding using the recorded PR plan above.
 
 #### Required context
 - Read all applicable AGENTS.md files and repository documentation.
@@ -225,8 +234,9 @@ separate API/UI disposition listed below — a settings-only repository gets no 
   - Acceptance: `<exact command or static check>`
 
 #### Constraints
-- At most one PR per repository, regardless of finding count, and only when committed
-  changes exist; settings-only findings are discharged by API/UI disposition instead.
+- Follow the emitted PR purposes exactly. A `CSharpierFormatting` PR contains only the
+  formatter configuration and mechanical reformat; `RemainingFindings` contains every
+  other finding. `AllFindings` is the normal single-PR plan.
 - Do not change another repository, suppress diagnostics to obtain a pass, edit the audit
   report, or perform unrelated refactoring.
 - Preserve unrelated work and follow the repository's test, commit, PR, review, and merge
@@ -234,7 +244,7 @@ separate API/UI disposition listed below — a settings-only repository gets no 
 
 #### Verification and return
 Run every finding's acceptance check plus the repository's normal formatting check,
-Release build, and tests. Return the branch, commits, PR URL (when one was opened),
+Release build, and tests. Return each applicable branch, commits, PR URL,
 finding-to-change mapping, verification results, and remaining blockers.
 ```
 
@@ -253,7 +263,7 @@ agent to rediscover what the audit already established.
 | Auditing worktrees, archives, loose projects, or vendor code | Keep the agreed Git-repository candidate boundary. |
 | Treating unavailable InspectCode or API access as pass | Mark the check `Not assessed` and the verdict `Incomplete` when required. |
 | Producing many evidence and prompt files | Produce one vault report. |
-| Generating one PR or prompt per finding | Consolidate all findings into one prompt and at most one PR per repository; settings-only findings are a separate API/UI action, never an empty PR. |
+| Generating one PR or prompt per finding | Consolidate all findings into one prompt and one PR per repository, except the required standalone CSharpier width reformat. |
 
 ## Red flags — stop
 

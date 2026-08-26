@@ -21,6 +21,9 @@ foreach ($note in '~/.agents/notes/npm-publishing-traps.md','~/.agents/notes/web
     if ($skill -notmatch [regex]::Escape($note)) { throw "skill missing canonical note: $note" }
 }
 if ($architecture -notmatch [regex]::Escape('*.{test,spec,archunit}.*')) { throw 'architecture wrapper is not excluded from its own graph' }
+if ($skill -notmatch [regex]::Escape('npm exec --silent --yes --package=typescript@<version> --call "tsc --showConfig --project <config>"')) {
+    throw 'skill missing npm 11-compatible TypeScript config verification command'
+}
 
 # Test sources must belong to a project: without tsconfig.test.json referenced from the
 # root solution file, `tsc -b` type-checks app and node config while Vitest transpiles

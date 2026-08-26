@@ -1,0 +1,34 @@
+{
+  "run": {
+    "id": 4242,
+    "head_sha": "1111111111111111111111111111111111111111",
+    "conclusion": "success"
+  },
+  "total_count": 4,
+  "jobs": [
+    {
+      "name": "Backend (.NET)",
+      "started_at": "2026-08-26T10:00:00Z",
+      "completed_at": "2026-08-26T10:07:00Z",
+      "conclusion": "success"
+    },
+    {
+      "name": "Frontend (UI) (node 22)",
+      "started_at": "2026-08-26T10:00:00Z",
+      "completed_at": "2026-08-26T10:05:00Z",
+      "conclusion": "success"
+    },
+    {
+      "name": "Frontend (UI) (node 24)",
+      "started_at": "2026-08-26T10:00:00Z",
+      "completed_at": "2026-08-26T10:05:00Z",
+      "conclusion": "success"
+    },
+    {
+      "name": "Secrets",
+      "started_at": "2026-08-26T10:00:00Z",
+      "completed_at": "2026-08-26T10:01:00Z",
+      "conclusion": "success"
+    }
+  ]
+}

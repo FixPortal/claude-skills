@@ -104,7 +104,19 @@ When they ARE wanted:
 - `Scalar.AspNetCore` — latest version
 - If the project uses central package management (`Directory.Packages.props`), add `PackageVersion` entries there and use versionless `PackageReference` in the project file
 - If not using central package management, add versioned `PackageReference` entries directly in the project file
-- Before enabling ASP.NET OpenAPI source generation, check the `Microsoft.OpenApi` version in whichever of the two schemes the project uses — they are **alternatives, not layers**: a centrally managed project pins in `Directory.Packages.props` and carries versionless `PackageReference` entries, while a direct project pins in the `.csproj`. Whichever declares the version must remain `<3.0.0`; a versionless `PackageReference` under central management is correct and is not a missing pin. `Microsoft.OpenApi 3.x` breaks the current generator. For a brand-new project, run `scaffold-dotnet` first, then add this minimal-API/OpenAPI delta.
+- Before enabling ASP.NET OpenAPI source generation, inspect the target framework and the resolved `Microsoft.AspNetCore.OpenApi` dependency, then check the `Microsoft.OpenApi` version in whichever of the two schemes the project uses — they are **alternatives, not layers**: a centrally managed project pins in `Directory.Packages.props` and carries versionless `PackageReference` entries, while a direct project pins in the `.csproj`. A versionless `PackageReference` under central management is correct and is not a missing pin.
+
+  | Target stack | Target framework | Compatible `Microsoft.OpenApi` line |
+  |---|---|---|
+  | ASP.NET Core 10 and earlier | `net10.0` or earlier | `2.x` (`<3.0.0`) |
+  | ASP.NET Core 11 and later | `net11.0` or later | supported `3.x` |
+
+  Preserve 2.x for ASP.NET Core 10 and earlier source-generation stacks because
+  `Microsoft.OpenApi 3.x` is incompatible there. For ASP.NET Core 11 and later,
+  follow the supported 3.x dependency line of the matching
+  `Microsoft.AspNetCore.OpenApi` package; do not force a universal Microsoft.OpenApi ceiling.
+  For a brand-new project, run `scaffold-dotnet` first, then add this
+  minimal-API/OpenAPI delta.
 
 ## Self-contained route example
 

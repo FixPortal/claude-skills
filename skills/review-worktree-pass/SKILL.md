@@ -23,14 +23,23 @@ in the primary project checkout, with one numbered branch per pass.
   findings, use `git worktree list` to choose one path:
   - **If the review worktree already exists** for an in-flight pass, `cd` into
     it and run `git fetch --prune` as a discrete command before any new branch
-    choice.
+    choice. Resolve and verify the project mainline using the procedure below.
   - **If the review worktree is absent** after teardown, `cd` to the verified
     primary checkout (confirm it with `git worktree list`) and run
-    `git fetch --prune` as a discrete command. Then select the next batch
-    number and create the branch from `origin/main` with
-    `git worktree add -b reviewer-findings-batch<N> <review-worktree-path> origin/main`.
+    `git fetch --prune` as a discrete command. Resolve and verify the project
+    mainline from `origin/HEAD`, then select the next batch number and create the
+    branch with
+    `git worktree add -b reviewer-findings-batch<N> <review-worktree-path> <mainline-ref>`.
     This creates the dedicated worktree; it does not branch the primary
     checkout.
+
+After fetching, resolve `<mainline-ref>` with
+`git symbolic-ref --quiet --short refs/remotes/origin/HEAD`. If that symbolic
+ref is absent, use `git ls-remote --symref origin HEAD` and accept only its
+single advertised `refs/heads/<branch>` target as `origin/<branch>`. Verify the
+result with `git rev-parse --verify --quiet "<mainline-ref>^{commit}"`; stop if
+the remote HEAD is missing, ambiguous, or not present in the refreshed local
+refs. Record that verified ref and use it throughout the pass.
 
 **Why:** the primary checkout is where parallel feature work, dogfooding, and
 manual exploration live. Letting a review pass land there overlaps with in-flight
@@ -67,16 +76,19 @@ above already gives you.
 
 The review worktree and its branch are **ephemeral** — they exist only while a
 pass is in flight. Nothing should linger between passes: when a pass is done
-(branch merged into `main`, repo clean, `origin` clean, no pass running),
+(branch merged into the verified `<mainline-ref>`, repo clean, `origin` clean,
+no pass running),
 **remove both** the worktree and the `reviewer-findings-batch<N>` branch.
-Recreate them from scratch (`git worktree add` + branch from `origin/main`) at
+Recreate them from scratch (`git worktree add` + branch from the verified
+`<mainline-ref>`) at
 the start of the next review.
 
 Stale-after-merge cleanup (pre-authorised post-merge tidy): before deleting the
 branch, confirm it is genuinely merged using the rebase-merge fingerprint from
 the *Pull request merge style* rule: **both** the remote branch is gone and the
-local branch's commit titles match the rebased commits on main. An empty
-`git diff origin/main..<branch>` is useful supplemental evidence, never a
+local branch's commit titles match the rebased commits on the verified
+mainline. An empty
+`git diff <mainline-ref>..<branch>` is useful supplemental evidence, never a
 substitute for either required check.
 
 Because the branch is checked out in the worktree, first change the shell's

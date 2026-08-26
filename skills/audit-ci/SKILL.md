@@ -17,7 +17,10 @@ layer caching), which the house rollout has not yet reached.
 practice".** `scaffold-ci` is the single source of truth for the house standard.
 Read its [ten control surfaces](../scaffold-ci/SKILL.md), its [CI workflow
 contract](../scaffold-ci/references/ci-workflow.md), and its shipped
-[`secret-sweep.yml`](../scaffold-ci/assets/secret-sweep.yml) at audit time;
+[`secret-sweep.yml`](../scaffold-ci/assets/secret-sweep.yml),
+[`assert_gate_coverage.py`](../scaffold-ci/assets/assert_gate_coverage.py),
+[`assert_workflow_hygiene.py`](../scaffold-ci/assets/assert_workflow_hygiene.py), and
+[review-policy contract](../scaffold-ci/references/review-policy.md) at audit time;
 compare against those assets rather than duplicating their pins or rules here.
 
 **This skill is read-only and advisory.** It diffs config against the standard and
@@ -58,7 +61,7 @@ the trigger / ref-gating findings **unverifiable** rather than assuming `main`.
 ## 2. Inventory
 
 Start with `scripts/get-workflow-inventory.ps1 -RepositoryRoot <repo>`. Record its sorted
-output and count. The audit is incomplete unless every inventoried workflow has one evidence
+output and inventory count. The audit is incomplete unless every inventoried workflow has one evidence
 row; never infer repository-wide conformance from `ci.yml` alone.
 
 Read, per repo, using the runtime's filesystem listing, reading, and search
@@ -138,21 +141,26 @@ canonical value from `scaffold-ci` and compare.
 | Dimension | What to check | Typical finding |
 |---|---|---|
 | **ci.yml present** | build + test + lint per stack | gap: no CI at all |
+| **CI Gate** | Run the repository's shipped `assert_gate_coverage.py` against `ci.yml`; require its `Gate coverage` job to execute that checker and require zero-authority `CI Gate` semantics from the current CI workflow contract | gap: a quality job is absent from `needs`; drift: missing `if: always()`, result aggregation, gate coverage, or zero permissions |
 | **Action pins** | compare each `uses:` against `scaffold-ci`'s pin table (re-read it — pins drift and dependabot bumps them) | drift: stale `@v4` checkout, etc. |
 | **Third-party SHA pins** | third-party actions use a valid full commit SHA, not a floating tag. Cross-check the live upstream major tag **of the action's own repo**, dereferencing an annotated tag to its commit (`refs/tags/<tag>^{}` with lightweight-tag fallback). A valid immutable pin behind the moving tag is timestamped `freshness drift`: report it, but it does not change the repository verdict. A floating tag, nonexistent commit, wrong repository, or known revoked/compromised commit remains blocking structural drift. | structural drift: `raven-actions/actionlint@v2`; freshness drift: a valid older SHA under `# v2` |
 | **First-party pin style** | first-party `actions/*` take the major tag, not a SHA (the inverse of third-party) — except the **reviewed exception** in [`scaffold-ci/assets/secret-sweep.yml`](../scaffold-ci/assets/secret-sweep.yml), whose full-history checkout is SHA-pinned. Compare that workflow with the shipped asset; do not report its matching checkout pin as drift. | drift: an ordinary workflow mixes `actions/checkout@<sha>` with `@v7` |
 | **actionlint step** | normally the first validation step after checkout; on a cold runner consuming private npm packages, `setup-node` and `NODE_AUTH_TOKEN` must come before actionlint so its transitive install can authenticate | gap: missing; drift: private-npm actionlint runs before authentication |
+| **Workflow hygiene** | compare `.github/scripts/assert_workflow_hygiene.py` with the shipped asset and run it over every local workflow; confirm `review-policy-guard.yml` invokes it | gap: guard never executes the parser; drift: local checker differs from the shipped asset |
 | **Concurrency** | deploy repo → flat `cancel-in-progress: false`; no-deploy → `${{ github.ref != 'refs/heads/main' }}` | drift: flat `false` on a library repo; unconditional `true` |
 | **Triggers** | [push to mainline + tags `v*`](../scaffold-ci/references/ci-workflow.md) + `pull_request` to mainline + bare `workflow_dispatch` | drift: push builds every branch or omits tags |
+| **Tag ancestry** | for every tag-fired publish/deploy path, apply the current ancestry assertion from `scaffold-ci/references/ci-workflow.md` | drift: a `v*` tag can publish an unreviewed commit |
+| **Required-lane cost** | derive the current per-test, per-job, aggregate, and extended-lane ceilings from `scaffold-ci/references/ci-workflow.md`; count matrix legs and keep extended work out of `CI Gate` | drift: timeout/cost exceeds the current contract or slow coverage blocks PRs |
+| **CSharpier gate** | in each .NET backend job, derive the command/order from `scaffold-ci`: local tool restore, read-only CSharpier check, then NuGet restore/build/test | gap: no format gate; drift: check runs after restore or CI mutates source |
 | **Dead dispatch input** | `workflow_dispatch` `environment` choice only where a deploy job reads it | subtract: dead dropdown no step consumes |
 | **dependabot.yml** | present; ecosystems match the repo (nuget/npm/github-actions); npm `directory` points at the real `package.json` folder; private feeds have a referenced `registries:` entry and a Dependabot-store secret; peer-locked families such as Vite/vitest have a major-admitting group above the minor/patch catch-all | gap / drift: missing npm ecosystem, wrong directory, private updater cannot authenticate, or Vite major PRs cannot install |
 | **mutation.yml** | present + separate workflow for any repo with a .NET test project; exactly `workflow_dispatch` plus one staggered weekly UTC schedule, with no push/PR trigger; no `continue-on-error`; `break: 0`; ordinary one-project lane runs from the intended unit-test project directory; MTP config has no `test-case-filter`; intentional multi-project lanes use documented `test-projects` from the project-under-test directory; discovered-test count matches the lane and known-tested code produces a non-zero `Killed` count | gap: missing or manual-only; drift: push/PR/nightly trigger, run as a `ci.yml` gate, inert MTP filter, or unverified discovery/result attribution |
 | **Stryker support files** | with `mutation.yml`: local tool manifest contains Stryker and CSharpier without replacing existing tools; `stryker-config.json` matches the selected lane and house defaults; the workflow uses `scripts/summarize-stryker.ps1`; compare that file with the shipped template using `scripts/compare-canonical-file.ps1 -IgnoreLineEndings` | gap: any support file absent; drift: manifest clobbered, config contradicts the lane, or the script is not the shipped content |
-| **Secret scanning** | For private repos, compare the CI gate and `secret-sweep.yml` **trigger**, action **pin**, TruffleHog **detector**, and Gitleaks **install**/checksum only with [`scaffold-ci/assets/secret-sweep.yml`](../scaffold-ci/assets/secret-sweep.yml) and [`scaffold-ci/references/dependencies-and-security.md`](../scaffold-ci/references/dependencies-and-security.md); do not duplicate those values here. | gap: either private-repo compensating control absent; drift: gate or sweep diverges from its shipped contract |
+| **Secret scanning** | For private repos, derive the contract from [`scaffold-ci/assets/secret-sweep.yml`](../scaffold-ci/assets/secret-sweep.yml) and [`scaffold-ci/references/dependencies-and-security.md`](../scaffold-ci/references/dependencies-and-security.md). Require the CI job to run both the PR commit-range scan and checked-out-tree scan and to feed `CI Gate`; compare the sweep's trigger, pins, detector allowlist, install and checksum with the canonical sources. | gap: either compensating control or either CI scan absent; drift: secret job is not gated or sweep diverges from its shipped contract |
 | **GitHub security surfaces** | public: CodeQL default setup, secret scanning and push protection enabled; every visibility: paid Code Quality disabled unless current charges were explicitly approved, with AI disabled when authorized; private/internal: paid Code Security and secret scanning disabled | gap: public free CodeQL/secret coverage off; drift: Code Quality enabled without explicit cost approval or any paid private surface enabled; subtract: any automatic `copilot_code_review` ruleset or committed `codeql.yml` |
 | **Dependabot security settings** | vulnerability alerts GET returns HTTP 204; automated security fixes GET returns HTTP 200 with `enabled: true` and `paused: false`. **These are CONFIGURATION checks and passing them is not evidence Dependabot is fixing anything** — a repo can pass every row here while a high-severity alert sits unactioned, because Dependabot can reach a wrong "cannot update" verdict (`~/.agents/notes/npm-publishing-traps.md` trap 16). The outcome axis belongs to `audit-dependabot-coverage`; do not report Dependabot healthy on config alone. | gap: either repository setting is off or automated fixes are paused |
 | **`.gitignore`** | Claude scratch uses `.claude/*` with `!.claude/review-policy.json`; `git add --dry-run .claude/review-policy.json` succeeds | drift: `.claude/` excludes the parent directory, so the policy can never be committed |
-| **`review-policy-guard.yml`** | present wherever `review-policy.json` is scaffolded; runs on all pushes and PRs to the mainline; requires the policy to be tracked and uses `git check-ignore --no-index` to prove it remains unignored; `Review policy intact` is required | gap: guard or required context absent; drift: plain `git check-ignore` makes the tracked-file check inert |
+| **`review-policy-guard.yml`** | compare with the shipped control, confirm it runs workflow hygiene, and require the exact current merge-barrier paths from `scaffold-ci/references/review-policy.md` to be HIGH; `Review policy intact` remains required | gap: guard, hygiene execution, HIGH path, or required context absent; drift: local guard diverges from the current contract |
 | **Job-lane naming** | deploy jobs contain `deploy`; publish jobs a package term; one job = one lane | drift: a `build-and-push` job that mis-lanes or vanishes from the dashboard |
 | **`review-policy.json`** | present; `high` covers the migration / infra / workflow / auth paths this repo actually has, and does NOT list dependency manifests (`package.json`, `package-lock.json`, `Directory.Packages.props`, `**/*.csproj` — reversed 2026-07-29; HIGH requires CodeRabbit, which refuses bot authors, so it demands a reviewer that can never run); **every** `low` glob is genuinely unreachable from this repo's deploy jobs — verify against the deploy/publish steps you just inventoried, do not take the list on trust | gap: absent (safe — all PRs default NORMAL); **drift: a `low` glob that IS reachable, e.g. `**/*.md` in a repo that publishes its markdown, or `.dockerignore` in a repo that ships an image** |
 | **`.coderabbit.yaml`** | present with `auto_review.enabled: false` **and** `labels: ["review-high"]`; `auto_pause_after_reviewed_commits: 2`; `ignore_usernames` lists `dependabot[bot]` and `renovate[bot]`; no `ignore_title_keywords` | gap: missing, so the repo runs on CodeRabbit defaults; **drift: `enabled: true` — reviews every PR regardless of tier, so `review-policy.json` decides nothing**; **drift (worse than `true`): `enabled: false` with NO `labels` list — the gate's `review-high` label is inert, no CodeRabbit check registers, and `pr-review-watch.sh` reads the persistently absent check as "not installed" and stops gating, so a HIGH PR merges unreviewed while every signal looks clean**; **drift: `"chore:"` in `ignore_title_keywords`, which matches this estate's Dependabot titles verbatim and skips PRs silently** |
@@ -168,6 +176,35 @@ Whenever `scaffold-ci` calls a file `shipped verbatim` or `copy-only`, path pres
 evidence: compare content with `scripts/compare-canonical-file.ps1`. Use semantic comparison
 only where the source reference explicitly permits adaptations such as repository cron or
 comments; list each permitted field rather than treating every difference as acceptable.
+
+For a private .NET repository, collect measured required-lane evidence before the
+executable cross-check:
+
+1. Resolve the audited head SHA independently from the repository/default branch.
+2. List completed `ci.yml` workflow runs through the Actions runs API with full
+   pagination. Check the `gh` exit status before parsing, then select a successful run
+   whose `head_sha` exactly equals the audited SHA. A same-branch run at another SHA is
+   stale evidence.
+3. List that run's jobs through the Actions jobs API with `filter=latest` and full
+   pagination. Check the `gh` exit status before parsing each response. Preserve the
+   response envelope's nonnegative `total_count`, append every page's jobs, and verify
+   the accumulated job count exactly equals `total_count`. Write a temporary, sanitized
+   JSON object containing only `run: { id, head_sha, conclusion }`, `total_count`, and
+   every job's `name`, `started_at`, `completed_at`, and `conclusion`; do not write it
+   into the repository.
+4. Run
+   `scripts/test-scaffold-contract.ps1 -RepositoryRoot <repo> -ScaffoldRoot ../scaffold-ci -ActionsEvidencePath <temp-json> -ExpectedHeadSha <sha>`.
+   The checker maps required CI Gate job display names to every expanded Actions job,
+   sums measured durations, and excludes the lightweight gate-control jobs. Missing,
+   failed, incomplete, or stale evidence fails closed. When measured required work is
+   above the scaffold's 15-minute target, write a separate temporary sanitized approval
+   object with `approved: true`, nonempty `owner`, valid `approved_at`, the audited
+   `head_sha`, and the measured Actions `run_id`; pass its path as `-ApprovalPath`.
+   Free-form text is not approval evidence, and a missing, malformed, stale, or
+   unapproved object fails closed. Never infer approval from timeouts or repository
+   configuration. The executable result is `APPROVED_EXCEPTION`, not `COMPLIANT`.
+
+A failure is audit evidence, not a reason to fall back to the older prose checklist.
 
 On a **sweep**, additionally flag **cross-repo inconsistency**: the same knob set
 differently across repos (different checkout pins, some repos on Blacksmith and some
@@ -278,23 +315,6 @@ vault content:
 - a per-repo findings block for anything not captured by the matrix.
 
 Convert relative dates to absolute when stamping the report.
-
-## Common mistakes
-
-| Mistake | Fix |
-|---|---|
-| Hardcoding action pins / rules in this skill | Read them from `scaffold-ci` at audit time; they drift. |
-| Recommending Blacksmith for every Docker job | Gate on build frequency vs the 7-day eviction and image size; a rarely-built image never warms the cache. |
-| Recommending a Blacksmith move for a `--provenance` publish job | It must stay `ubuntu-latest` (sigstore rejects self-hosted). |
-| Recommending a `blacksmith-*` runner without the actionlint allowlist | The move needs `.github/actionlint.yaml` too, or actionlint red-fails. |
-| Concluding "no workflows" from an empty `**` glob | `**` skips the dotted `.github` dir; enumerate by literal path. |
-| Checking only `ci.yml` deeply | Record the workflow inventory count and one evidence row per path before grading. |
-| Treating a valid older immutable SHA as structural failure | Report timestamped `freshness drift`; it does not change the repository verdict. |
-| Treating a copy-only asset's presence as conformance | Compare its content with the canonical asset; existence proves nothing about drift. |
-| Editing workflows to "just fix it" | Read-only skill. Hand remediation to `scaffold-ci` in the review worktree. |
-| Flagging a no-deploy repo's ref-gated concurrency as wrong | Flat `false` is house-correct only for deploy repos; ref-gated is right for libraries. |
-| Calling a manual-only, nightly, push, or PR-triggered mutation workflow compliant | House cadence is `workflow_dispatch` plus one staggered weekly UTC schedule. |
-| Treating cross-repo inconsistency as fine because each value is defensible | Inconsistency is itself a finding on a sweep — flag it. |
 
 ## Red flags — STOP
 

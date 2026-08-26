@@ -27,7 +27,7 @@ Before converting any controller, read [the complete conversion contract](refere
 - Keep `app.UseAuthorization()` whenever any endpoint, controller, or pipeline behavior requires its semantics or order.
 - Remove `AddControllers()` and `MapControllers()` only when nothing retained needs them.
 - Match `Microsoft.AspNetCore.OpenApi` to the target framework major and use central package management when present.
-- Before enabling ASP.NET OpenAPI source generation, inspect direct and centrally managed `Microsoft.OpenApi` declarations; require `<3.0.0` while 3.x is incompatible.
+- Before enabling ASP.NET OpenAPI source generation, inspect the target framework and the resolved `Microsoft.AspNetCore.OpenApi` dependency, then inspect the direct or centrally managed `Microsoft.OpenApi` declaration. Keep 2.x for ASP.NET Core 10 and earlier source-generation stacks; use the supported 3.x line for ASP.NET Core 11 and later. Do not force a universal Microsoft.OpenApi ceiling.
 - Delete `Controllers/` only when every controller and ledger row is converted and verified.
 
 ## Compact checklist

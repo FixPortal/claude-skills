@@ -1,0 +1,39 @@
+{
+  "default_branch_sha": "1111111111111111111111111111111111111111",
+  "repository": {
+    "exit_code": 0,
+    "http_status": 200,
+    "body_json": "{\"full_name\":\"example/public-repo\",\"visibility\":\"public\",\"owner\":{\"type\":\"Organization\"},\"security_and_analysis\":{\"secret_scanning\":{\"status\":\"enabled\"},\"secret_scanning_push_protection\":{\"status\":\"enabled\"},\"secret_scanning_non_provider_patterns\":{\"status\":\"enabled\"},\"secret_scanning_validity_checks\":{\"status\":\"enabled\"}}}"
+  },
+  "code_scanning_default_setup": {
+    "exit_code": 0,
+    "http_status": 200,
+    "body_json": "{\"state\":\"configured\"}"
+  },
+  "code_scanning_analysis": {
+    "exit_code": 0,
+    "http_status": 200,
+    "body_json": "{\"commit_sha\":\"1111111111111111111111111111111111111111\",\"results_count\":0}"
+  },
+  "actions_run": {
+    "exit_code": 0,
+    "http_status": 200,
+    "body_json": "{\"head_sha\":\"1111111111111111111111111111111111111111\",\"conclusion\":\"success\"}"
+  },
+  "code_quality_setup": {
+    "exit_code": 0,
+    "http_status": 200,
+    "body_json": "{\"state\":\"not-configured\"}"
+  },
+  "code_security_configuration": {
+    "exit_code": 0,
+    "http_status": 200,
+    "body_json": "{\"name\":\"Public repositories\",\"status\":\"attached\"}"
+  },
+  "secret_scanning_repository_alerts": {
+    "exit_code": 0,
+    "http_status": 200,
+    "body_json": "[]"
+  },
+  "code_quality_org_access": "UNVERIFIED"
+}

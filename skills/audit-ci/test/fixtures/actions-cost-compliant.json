@@ -1,0 +1,40 @@
+{
+  "run": {
+    "id": 4242,
+    "head_sha": "1111111111111111111111111111111111111111",
+    "conclusion": "success"
+  },
+  "total_count": 5,
+  "jobs": [
+    {
+      "name": "Backend (.NET)",
+      "started_at": "2026-08-26T10:00:00Z",
+      "completed_at": "2026-08-26T10:06:00Z",
+      "conclusion": "success"
+    },
+    {
+      "name": "Frontend (UI)",
+      "started_at": "2026-08-26T10:00:00Z",
+      "completed_at": "2026-08-26T10:04:00Z",
+      "conclusion": "success"
+    },
+    {
+      "name": "Secrets",
+      "started_at": "2026-08-26T10:00:00Z",
+      "completed_at": "2026-08-26T10:02:00Z",
+      "conclusion": "success"
+    },
+    {
+      "name": "Gate coverage",
+      "started_at": "2026-08-26T10:06:00Z",
+      "completed_at": "2026-08-26T10:06:10Z",
+      "conclusion": "success"
+    },
+    {
+      "name": "CI Gate",
+      "started_at": "2026-08-26T10:06:10Z",
+      "completed_at": "2026-08-26T10:06:20Z",
+      "conclusion": "success"
+    }
+  ]
+}

@@ -46,6 +46,23 @@ foreach ($needle in 'Directory.Packages.props', 'PackageReference', 'Microsoft.O
         throw "missing OpenAPI compatibility guard: $needle"
     }
 }
+
+$compatibilityCases = @(
+    @{ Target = 'ASP.NET Core 10 and earlier'; Framework = '`net10.0` or earlier'; OpenApi = '`2.x` (`<3.0.0`)' },
+    @{ Target = 'ASP.NET Core 11 and later'; Framework = '`net11.0` or later'; OpenApi = 'supported `3.x`' }
+)
+foreach ($case in $compatibilityCases) {
+    $row = "| $($case.Target) | $($case.Framework) | $($case.OpenApi) |"
+    if ($reference -notmatch [regex]::Escape($row)) {
+        throw "missing OpenAPI compatibility fixture: $row"
+    }
+}
+foreach ($needle in 'inspect the target framework and the resolved `Microsoft.AspNetCore.OpenApi` dependency',
+                    'do not force a universal Microsoft.OpenApi ceiling') {
+    if ($all -notmatch [regex]::Escape($needle)) {
+        throw "missing TFM/package compatibility rule: $needle"
+    }
+}
 # Both declaration schemes must be covered, AND named as alternatives. The two are
 # mutually exclusive - a centrally managed project carries versionless PackageReference
 # entries by design - so wording that reads as "check both places" invites treating a

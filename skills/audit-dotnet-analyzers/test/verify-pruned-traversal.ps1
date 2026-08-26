@@ -35,8 +35,10 @@ try {
         throw "Traversal did not prune node_modules before inventory: $($values -join ', ')"
     }
     # The fixture's .git is an empty directory, so `git status` FAILS there by design.
-    if (-not $result.Repositories[0].GitStatusFailed -or $null -ne $result.Repositories[0].Mutated) {
-        throw 'A repo whose git status cannot be read must report GitStatusFailed and Mutated=$null'
+    $failed = $result.Repositories[0]
+    if ($failed.GitStatusBefore.Success -or $failed.GitStatusAfter.Success -or
+        $failed.MutationState -ne 'Unknown' -or $null -ne $failed.Mutated) {
+        throw 'A repo whose git status cannot be read must retain both failed probes and MutationState=Unknown'
     }
 
     # A REAL clean repo: `git status --porcelain` exits 0 with NO output. The status
@@ -57,11 +59,11 @@ try {
 
     $cleanResult = & $inventory -Path $cleanRepo 3>$null | ConvertFrom-Json
     $clean = $cleanResult.Repositories[0]
-    if ($clean.GitStatusFailed) {
-        throw 'A CLEAN repo must not report GitStatusFailed - the empty status capture is success, not failure'
+    if (-not $clean.GitStatusBefore.Success -or -not $clean.GitStatusAfter.Success) {
+        throw 'A CLEAN repo must retain both successful empty git-status probes'
     }
-    if ($clean.Mutated -ne $false) {
-        throw "A clean repo must report Mutated=`$false, got '$($clean.Mutated)'"
+    if ($clean.Mutated -ne $false -or $clean.MutationState -ne 'Unchanged') {
+        throw "A clean repo must report Mutated=`$false and MutationState=Unchanged, got '$($clean.Mutated)'/'$($clean.MutationState)'"
     }
 }
 finally {

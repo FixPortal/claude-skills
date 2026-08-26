@@ -24,9 +24,9 @@ delegates. Never assume an unrelated host's policy.
 
 Before selecting a memory provider, require a Git repository and initialize
 the topic variables. Take the root in two steps, checking the exit code before
-using the output — `$ErrorActionPreference = 'Stop'` does **not** trip on a
-native nonzero exit, so an unchecked lookup outside a repository carries an
-empty root into the topic key and recalls the wrong project's memory:
+using the output. `$ErrorActionPreference = 'Stop'` does not make a native
+nonzero exit safe; [references/troubleshooting.md](references/troubleshooting.md)
+records the failure mode.
 
 ```powershell
 $rootRaw = git rev-parse --show-toplevel
@@ -57,13 +57,8 @@ unusable, which simply yields the four-topic read set.
 
 Then read `$topicInfo.ReadTopics` — the deduplicated set of every topic this
 repository's memory has ever been filed under. Do not assemble that list by
-hand. The suffix arrived on 2026-08-12 with no migration, so anything stored
-before it lives under the unsuffixed name; and `icm remember` files under the
-git remote name while close used the directory name, which differ wherever a
-checkout's folder is not named after its repository. Measured that day on one
-such checkout: 1 memory under the derived topic, 27 under the unsuffixed
-directory name, 4 under the remote name — all three the same project. Recap
-never writes, so reading a historical channel costs it nothing.
+hand; the troubleshooting reference records why legacy and remote-named topics
+remain necessary.
 
 Now use the runtime's native project-memory recall when its active contract
 defines one. Otherwise, if `icm.exe` resolves on `PATH`, enumerate all four exact

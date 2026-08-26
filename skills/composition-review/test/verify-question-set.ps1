@@ -54,11 +54,73 @@ if ($contract -notmatch 'is a coverage gap') {
     throw 'An unjustified N/A on Q1/Q2/Q5 is no longer a coverage gap.'
 }
 
-# One subagent, asserted POSITIVELY. The previous word-ban on "panel"/"cross-vendor"
-# bought nothing - deleting the whole Dispatch section, or asking for five subagents,
-# both slipped past it - while false-positiving on legitimate prose about class C.
-if ($body -notmatch '(?m)^Send \*\*one\*\* subagent') {
-    throw 'Dispatch must instruct exactly one subagent (line starting "Send **one** subagent").'
+# Dispatch is a capability contract, not a Claude API contract. A shared runtime may
+# expose a differently named subagent surface, no model aliases, no tool allowlist, or
+# no subagents at all. The review must still run, and a host that cannot enforce
+# read-only tools must prove that the repository state did not change.
+$dispatch = Get-Section -Heading 'Dispatch'
+foreach ($needle in "runtime's native subagent", 'single-agent fallback',
+                    'git status --short', 'git rev-parse HEAD', 'git diff --binary HEAD',
+                    'hashes of reported untracked files', 'before and after') {
+    if ($dispatch -notmatch [regex]::Escape($needle)) {
+        throw "Dispatch is missing the runtime-neutral fallback contract: $needle"
+    }
+}
+foreach ($hostCoupling in "Agent tool's short alias", 'Give it read-only tools') {
+    if ($dispatch -match [regex]::Escape($hostCoupling)) {
+        throw "Dispatch assumes a host-specific capability: $hostCoupling"
+    }
+}
+
+function Get-RepositoryState([string] $Repo) {
+    $head = (& git -C $Repo rev-parse HEAD | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0) { throw 'Could not capture repository HEAD.' }
+    $diff = (& git -C $Repo diff --binary HEAD | Out-String)
+    if ($LASTEXITCODE -ne 0) { throw 'Could not capture repository diff.' }
+    [pscustomobject]@{ Head = $head; Diff = $diff }
+}
+
+function Test-SameRepositoryState($Before, $After) {
+    $Before.Head -ceq $After.Head -and $Before.Diff -ceq $After.Diff
+}
+
+# Exercise the documented state proof. Status-only comparison misses both a new commit
+# and a re-staged edit whose porcelain state remains unchanged.
+$fixture = Join-Path ([IO.Path]::GetTempPath()) "composition-review-$([Guid]::NewGuid())"
+try {
+    New-Item -ItemType Directory -Path $fixture | Out-Null
+    & git -C $fixture init --quiet
+    & git -C $fixture config user.email 'composition-review@example.invalid'
+    & git -C $fixture config user.name 'Composition Review Test'
+    'baseline' | Set-Content -LiteralPath (Join-Path $fixture 'state.txt')
+    & git -C $fixture add state.txt
+    & git -C $fixture commit --quiet -m baseline
+
+    $before = Get-RepositoryState $fixture
+    if (-not (Test-SameRepositoryState $before (Get-RepositoryState $fixture))) {
+        throw 'An unchanged repository was reported as changed.'
+    }
+
+    'committed' | Set-Content -LiteralPath (Join-Path $fixture 'state.txt')
+    & git -C $fixture add state.txt
+    & git -C $fixture commit --quiet -m committed
+    if (Test-SameRepositoryState $before (Get-RepositoryState $fixture)) {
+        throw 'A commit made during review was not detected.'
+    }
+
+    'staged-one' | Set-Content -LiteralPath (Join-Path $fixture 'state.txt')
+    & git -C $fixture add state.txt
+    $stagedBefore = Get-RepositoryState $fixture
+    'staged-two' | Set-Content -LiteralPath (Join-Path $fixture 'state.txt')
+    & git -C $fixture add state.txt
+    if (Test-SameRepositoryState $stagedBefore (Get-RepositoryState $fixture)) {
+        throw 'A re-staged edit made during review was not detected.'
+    }
+}
+finally {
+    if (Test-Path -LiteralPath $fixture) {
+        Remove-Item -LiteralPath $fixture -Recurse -Force
+    }
 }
 
 # The teeth. A question set whose findings do not block is a domain present on paper.
