@@ -139,56 +139,6 @@ function Test-DependabotPrCoversPackage {
     return $prDirectory -ceq $alertDirectory
 }
 
-# --- where the fix lands -------------------------------------------------------
-# Package name alone is NOT coverage in a monorepo: one PR bumping a package in /web
-# says nothing about the same package's alert in /api. The alert says where it lives
-# (dependency.manifest_path); the PR says where it applies, in its branch
-# (dependabot/<ecosystem>/<directory...>/<update>) — its body names no directory for
-# a single-dep PR. Both must agree. When the PR's target cannot be established the
-# alert stays UNMATCHED: unresolvable is not covered.
-function Get-AlertTarget {
-    param([AllowNull()]$Alert)
-
-    $manifest = [string](Get-Prop $Alert @('dependency', 'manifest_path') '')
-    if (-not $manifest) { return $null }
-    $m = $manifest.Replace('\', '/').Trim('/')
-    $dir = if ($m.Contains('/')) { ($m -replace '/[^/]+$', '') } else { '' }
-    return [pscustomobject]@{
-        Directory = $dir
-        Ecosystem = [string](Get-Prop $Alert @('dependency', 'package', 'ecosystem') '')
-    }
-}
-
-function Test-DependabotPrTargetsAlert {
-    [OutputType([bool])]
-    param([AllowNull()]$Pr, [AllowNull()]$AlertTarget)
-
-    $branchEcosystems = @{
-        npm_and_yarn = 'npm'; nuget = 'nuget'; bundler = 'rubygems'; cargo = 'rust'
-        gomod = 'go'; maven = 'maven'; gradle = 'maven'; pip = 'pip'; composer = 'composer'
-        pub = 'pub'; swift = 'swift'; docker = 'docker'; terraform = 'terraform'
-    }
-
-    if ($null -eq $Pr -or $null -eq $AlertTarget) { return $false }
-    $ref = [string](Get-Prop $Pr @('head', 'ref') '')
-    $m = [regex]::Match($ref, '^dependabot/(?<eco>[^/]+)/(?<rest>.+)$')
-    if (-not $m.Success) { return $false }
-
-    # The final segment is the update identifier (package-and-version, or a group
-    # hash); everything between it and the ecosystem segment is the target directory.
-    $rest = $m.Groups['rest'].Value
-    $dir = if ($rest.Contains('/')) { ($rest -replace '/[^/]+$', '').Trim('/') } else { '' }
-    if ($dir -ne $AlertTarget.Directory) { return $false }
-
-    $alertEco = $AlertTarget.Ecosystem
-    if ($alertEco) {
-        $mapped = $branchEcosystems[$m.Groups['eco'].Value]
-        # An unmapped ecosystem pair cannot be compared, so it cannot be coverage.
-        if ($null -eq $mapped -or $mapped -ne $alertEco) { return $false }
-    }
-    return $true
-}
-
 # --- gh helpers --------------------------------------------------------------
 # gh writes its error BODY to stdout and only a one-line summary to stderr, so a
 # 403/404 yields a whole JSON document unless the exit status is checked. Every
@@ -490,7 +440,6 @@ foreach ($slug in $repos) {
             $ageHours = [int]($now - $created).TotalHours
         }
 
-        $target = Get-AlertTarget -Alert $a
         $match = $prs | Where-Object {
             Test-DependabotPrCoversPackage -Body ([string]$_.body) -PackageName ([string]$pkg) `
                 -HeadRefName ([string](Get-Prop $_ @('headRefName') '')) `
