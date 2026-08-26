@@ -110,16 +110,13 @@ jobs:
           $passed = 0
           foreach ($verifier in $verifiers) {
             Write-Host "Running $($verifier.FullName)"
-            # Reset BEFORE each verifier: a negative-path verifier deliberately runs a
-            # failing child and asserts its exit code, and that native status must not
-            # leak into the next script's result. A nonzero code AFTER a verifier is
-            # therefore that verifier's own failure — verifiers that leave a deliberate
-            # child's code behind clear it themselves on their success path.
-            $global:LASTEXITCODE = 0
+            # Run each verifier in its own process. A successful verifier may inspect a
+            # deliberately failing child; its child's native status must not be mistaken
+            # for the verifier's process exit code by this shared harness.
             $threw = $null
             $output = $null
             try {
-              $output = & $verifier.FullName *>&1 | Out-String
+              $output = & pwsh -NoProfile -File $verifier.FullName *>&1 | Out-String
             }
             catch {
               $threw = $_
