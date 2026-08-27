@@ -84,6 +84,7 @@ if (-not (Test-Path -LiteralPath $scriptPath)) {
 $fixture = Join-Path ([IO.Path]::GetTempPath()) ("performance-inventory-" + [guid]::NewGuid())
 $notARepo = Join-Path ([IO.Path]::GetTempPath()) ("performance-not-a-repo-" + [guid]::NewGuid())
 $limitRepo = Join-Path ([IO.Path]::GetTempPath()) ("performance-limit-" + [guid]::NewGuid())
+$markerLimitRepo = Join-Path ([IO.Path]::GetTempPath()) ("performance-marker-limit-" + [guid]::NewGuid())
 $directoryRepo = Join-Path ([IO.Path]::GetTempPath()) ("performance-directories-" + [guid]::NewGuid())
 $projectTruncationRepo = Join-Path ([IO.Path]::GetTempPath()) ("performance-project-depth-" + [guid]::NewGuid())
 $projectScaleRepo = Join-Path ([IO.Path]::GetTempPath()) ("performance-project-scale-" + [guid]::NewGuid())
@@ -191,6 +192,15 @@ exit 7
     $limitResult = Invoke-Inventory -Repository $limitRepo
     $limit = $limitResult.stdout | ConvertFrom-Json
     Assert-That ((@($limit.warnings | Where-Object { $_ -match 'Source-marker scan stopped: maximum file count 64 reached' }).Count -eq 1)) 'Expected fixed source-marker file ceiling warning.'
+
+    New-Item -ItemType Directory -Path $markerLimitRepo | Out-Null
+    Set-Content -LiteralPath (Join-Path $markerLimitRepo 'Markers.cs') -Value @(1..501 | ForEach-Object { 'class Marker { DbContext Context; }' })
+    $markerLimitResult = Invoke-Inventory -Repository $markerLimitRepo
+    Assert-That ($markerLimitResult.exitCode -eq 0) "Expected marker-capped inventory to exit successfully: $($markerLimitResult.stderr)"
+    Assert-That ([string]::IsNullOrWhiteSpace($markerLimitResult.stderr)) 'Expected marker-capped inventory stderr to be empty.'
+    $markerLimit = $markerLimitResult.stdout | ConvertFrom-Json
+    Assert-That ($markerLimit.markers.Count -eq 500) 'Expected exactly 500 retained source markers.'
+    Assert-That ((@($markerLimit.warnings | Where-Object { $_ -match 'Marker scan stopped: maximum marker count 500 reached' }).Count -eq 1)) 'Expected one marker ceiling warning.'
 
     New-Item -ItemType Directory -Path $directoryRepo | Out-Null
     1..65 | ForEach-Object { New-Item -ItemType Directory -Path (Join-Path $directoryRepo "directory$_") | Out-Null }
@@ -409,6 +419,7 @@ exit 7
     Assert-That ([string]::IsNullOrWhiteSpace($safe.stderr)) 'Expected managed BCL addition stderr to be empty.'
     Assert-That ((@($safe.stdout -split "`r?`n" | Where-Object { $_.Trim() }).Count -eq 1)) 'Expected exactly one managed-boundary JSON document on stdout.'
     $safeOutput = $safe.stdout | ConvertFrom-Json
+    Assert-That ($safeOutput.manualReviewLimitations -contains 'Concurrent working-tree mutation during the scan invalidates its result.') 'Expected concurrent working-tree mutation to be an explicit boundary limitation.'
     Assert-That $safeOutput.passed 'Expected ordinary managed BCL addition to pass.'
     Assert-That ($safeOutput.reviewedRange -match '\.\.working-tree$') 'Expected an explicit reviewed working-tree range.'
     Assert-That ($safeOutput.manualReviewLimitations -contains 'Generated code requires manual review.') 'Expected generated-code manual-review limitation.'
@@ -552,6 +563,9 @@ finally {
     }
     if (Test-Path -LiteralPath $limitRepo) {
         Remove-Item -LiteralPath $limitRepo -Recurse -Force
+    }
+    if (Test-Path -LiteralPath $markerLimitRepo) {
+        Remove-Item -LiteralPath $markerLimitRepo -Recurse -Force
     }
     if (Test-Path -LiteralPath $directoryRepo) {
         Remove-Item -LiteralPath $directoryRepo -Recurse -Force

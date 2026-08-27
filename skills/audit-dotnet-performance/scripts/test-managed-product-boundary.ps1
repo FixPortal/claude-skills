@@ -159,7 +159,8 @@ try {
         'Package transitivity requires manual review.',
         'Ambiguous interop requires manual review.',
         'Raw or lexically ambiguous source requires manual review.',
-        'Extensionless binary files require manual review.'
+        'Extensionless binary files require manual review.',
+        'Concurrent working-tree mutation during the scan invalidates its result.'
     )
     $violations = [Collections.Generic.List[object]]::new()
     $warnings = [Collections.Generic.List[object]]::new()
