@@ -76,6 +76,7 @@ catch {
     Fail "Manifest '$Path' is not valid JSON: $($_.Exception.Message)"
 }
 
+function Invoke-ManifestValidation {
 if ($null -eq $manifest -or $manifest -is [array]) { Fail 'Manifest must be a JSON object.' }
 $schemaVersion = Require-Property $manifest 'schemaVersion' 'manifest'
 if ($schemaVersion -isnot [long] -or $schemaVersion -ne 1) { Fail 'schemaVersion must be the number 1.' }
@@ -161,3 +162,11 @@ if ($Mode -eq 'Finding') {
 }
 
 [pscustomobject]@{ valid = $true } | ConvertTo-Json -Compress
+}
+
+try {
+    Invoke-ManifestValidation
+}
+catch {
+    Fail "Manifest '$Path' failed validation: $($_.Exception.Message)"
+}

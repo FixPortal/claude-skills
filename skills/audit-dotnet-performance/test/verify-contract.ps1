@@ -267,6 +267,13 @@ exit 7
     $validManifest | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $validManifestPath -NoNewline
     $beforeHash = (Get-FileHash -LiteralPath $validManifestPath).Hash
 
+    $caseVariantAuditPath = Join-Path $manifestDirectory 'case-variant-audit.manifest.json'
+    (($validManifest | ConvertTo-Json -Depth 8) -replace '"audit":', '"Audit":') | Set-Content -LiteralPath $caseVariantAuditPath -NoNewline
+    $caseVariantAudit = Invoke-Manifest -ManifestPath $caseVariantAuditPath
+    Assert-That ($caseVariantAudit.exitCode -ne 0) 'Expected an exact-case audit property mismatch to fail.'
+    Assert-That ($caseVariantAudit.stderr -match "Manifest '.+' failed validation:") "Expected an unexpected validation exception to use the clean failure contract: $($caseVariantAudit.stderr)"
+    Assert-That ($caseVariantAudit.stderr -notmatch 'ParentContainsErrorRecordException|CategoryInfo|FullyQualifiedErrorId') "Expected no raw PowerShell exception details: $($caseVariantAudit.stderr)"
+
     $emptyFindingsManifest = $validManifest | ConvertTo-Json -Depth 8 | ConvertFrom-Json
     $emptyFindingsManifest.findings = @()
     $emptyFindingsManifestPath = Join-Path $manifestDirectory 'empty-findings.manifest.json'
