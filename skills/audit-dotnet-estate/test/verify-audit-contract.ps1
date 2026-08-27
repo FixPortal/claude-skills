@@ -1,6 +1,7 @@
 $ErrorActionPreference = 'Stop'
 
 $skillRoot = Resolve-Path (Join-Path $PSScriptRoot '..')
+$skill = Get-Content -Raw -LiteralPath (Join-Path $skillRoot 'SKILL.md')
 $reader = Join-Path $skillRoot 'scripts/get-editorconfig-assignment.ps1'
 $planner = Join-Path $skillRoot 'scripts/get-remediation-plan.ps1'
 $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('dotnet-audit-contract-' + [guid]::NewGuid().ToString('N'))
@@ -14,6 +15,22 @@ function Assert-Equal($actual, $expected, [string] $because) {
 }
 
 try {
+    foreach ($requiredPerformanceCoverageContract in @(
+        '### Performance audit coverage \(informational, non-graded\)',
+        '(?s)Group pairs by the filename timestamp and\s+select the latest minute\. Validate every manifest in that minute; if any fails, classify\s+the coverage `Not assessed` without falling back\.',
+        '(?s)select the greatest\s+`audit\.completedUtc`.*breaking an exact tie by ordinal full filename, then compare\s+`repository\.head` with the estate audit''s HEAD',
+        '(?s)`Current`.*`Stale`.*`Not found`.*`Not assessed`',
+        '(?s)Performance audit coverage never changes a check result, repository verdict, finding, or\s+remediation prompt\.',
+        '(?s)Never invoke `audit-dotnet-performance`, build, test, benchmark, or\s+profile to fill a coverage gap'
+    )) {
+        if ($skill -notmatch $requiredPerformanceCoverageContract) {
+            throw "The estate report contract must match '$requiredPerformanceCoverageContract'."
+        }
+    }
+    if ($skill -match 'user-overridden location') {
+        throw 'The estate contract must not promise a performance-report location override that the source skill does not define.'
+    }
+
     $sourceRoot = Join-Path $tempRoot 'src'
     $nestedRoot = Join-Path $sourceRoot 'Nested'
     New-Item -ItemType Directory -Path $nestedRoot -Force | Out-Null

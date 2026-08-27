@@ -45,6 +45,8 @@ placeholders.
 | `audit-skills` | Audit authored agent skills across Claude Code, Codex, Kimi, and Antigravity for stale references, weak triggers, runtime incompatibility, and cross-home drift. |
 | `audit-github-estate` | GitHub quality and security across an org or repository estate — code scanning, Dependabot, secret scanning, Actions evidence, and post-merge verification. |
 | `audit-dotnet-estate` | Compare multiple .NET repositories against current house standards: scaffold drift, analyzer and formatter conformance, tests, docs, CI. |
+| `audit-dotnet-performance` | Measure and profile one .NET repository, rank evidence-backed performance findings, and publish a reproducible audit manifest. |
+| `remediate-dotnet-performance` | Run one approved performance experiment against a current audit finding, accepting only measured improvements that preserve correctness. |
 | `audit-dotnet-analyzers` | Inventory the analyzer and code-style configuration actually in force across a solution or estate, and produce a portable remediation prompt. |
 | `audit-dependabot-coverage` | Reconcile open advisories against the PRs Dependabot actually raised — the gap between "alerts exist" and "fixes were offered". |
 | `azure-cost-sweep` | Reconcile live Azure spend against the code and IaC that require it. Ranked, risk-annotated, and strict about the difference between a saving applied and a saving *realised* — the latter needs committed IaC plus live verification after a deploy. |
