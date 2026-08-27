@@ -154,14 +154,14 @@ foreach ($file in $projectFiles) {
 $markers = [System.Collections.Generic.List[object]]::new()
 $maxMarkers = 500
 $markerPatterns = [ordered]@{ DbContext = '\bDbContext\b'; HttpClient = '\bHttpClient\b'; BackgroundService = '\bBackgroundService\b'; 'Parallel.ForEachAsync' = '\bParallel\.ForEachAsync\b' }
-foreach ($file in $sourceFiles) {
+:markerScan foreach ($file in $sourceFiles) {
     if ($file.Length -gt $maxSourceBytes) { $warnings.Add("Source file exceeds $maxSourceBytes bytes and was skipped: '$([IO.Path]::GetRelativePath($resolved, $file.FullName))'."); continue }
     try { $lines = @(Get-Content -LiteralPath $file.FullName) }
     catch { $warnings.Add("Could not read source '$([IO.Path]::GetRelativePath($resolved, $file.FullName))': $($_.Exception.Message)"); continue }
     for ($i = 0; $i -lt $lines.Count; $i++) {
         foreach ($marker in $markerPatterns.Keys) {
             if ($lines[$i] -match $markerPatterns[$marker]) {
-                if ($markers.Count -ge $maxMarkers) { $warnings.Add("Marker scan stopped: maximum marker count $maxMarkers reached."); break 3 }
+                if ($markers.Count -ge $maxMarkers) { $warnings.Add("Marker scan stopped: maximum marker count $maxMarkers reached."); break markerScan }
                 $markers.Add([pscustomobject]@{ marker = $marker; file = [IO.Path]::GetRelativePath($resolved, $file.FullName); line = $i + 1 })
             }
         }
