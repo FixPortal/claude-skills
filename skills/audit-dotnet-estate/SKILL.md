@@ -24,6 +24,9 @@ drift, so do not copy them into this skill:
 - **REQUIRED:** `scaffold-tests`
 - **REQUIRED:** `scaffold-ci` and `audit-ci` for the CI dimension
 - **REQUIRED:** `scaffold-doc` for the vault report
+- **OPTIONAL COVERAGE SOURCE:** `audit-dotnet-performance`'s report contract and
+  publication validator, when that skill is installed and its report directory is
+  accessible. Use them only to classify existing audit coverage.
 
 Use `audit-ci`'s evaluation mechanics, but consolidate its evidence into this audit. This
 skill's single-report contract overrides `audit-ci`'s standalone sweep-report location.
@@ -89,6 +92,29 @@ For each estate root:
 
 Record path, remote, branch, HEAD SHA, dirty state, solution files, SDK selection, and
 applicable scoped instructions before running checks.
+
+### Performance audit coverage (informational, non-graded)
+
+For each candidate, inspect the newest paired performance report and manifest in the
+location defined by `audit-dotnet-performance`. Group pairs by the filename timestamp and
+select the latest minute. Validate every manifest in that minute; if any fails, classify
+the coverage `Not assessed` without falling back. Otherwise select the greatest
+`audit.completedUtc`, breaking an exact tie by ordinal full filename, then compare
+`repository.head` with the estate audit's HEAD:
+
+- `Current` — the newest valid manifest matches HEAD.
+- `Stale` — the newest valid manifest records another commit.
+- `Not found` — the report location is accessible but has no paired audit.
+- `Not assessed` — the skill or validator is unavailable, the location is unavailable, or
+  the newest pair cannot be validated.
+
+Record the status, manifest path, audited HEAD, completion time, and reason when not
+current; use `—` for fields unavailable under `Not found` or `Not assessed`. This proves
+coverage and manifest validity only, not report quality or independent immutability.
+Performance audit coverage never changes a check result, repository verdict, finding, or
+remediation prompt. Never invoke `audit-dotnet-performance`, build, test, benchmark, or
+profile to fill a coverage gap; hand stale, missing, and unavailable entries off as future
+one-repository-at-a-time audits.
 
 After discovering the solution format and findings, run
 `scripts/get-remediation-plan.ps1` with `SolutionFormat`,
@@ -191,11 +217,12 @@ Follow `scaffold-doc`'s vault conventions and use this order:
 3. A load-bearing verdict distribution diagram.
 4. Scope, exclusions, audit environment, and source-of-truth ledger, including any
    `Baseline defect` or baseline-validation `Not assessed` entries.
-5. Estate conformance matrix: one row per candidate, with each major dimension and the
-   repository verdict.
+5. Estate conformance matrix: one row per candidate, with each major dimension, the
+   non-graded `Performance audit coverage` status, and the repository verdict.
 6. Cross-estate findings, surprising and repeated issues first.
-7. Per-repository evidence: identity, a check table with `Evidence origin` and `Observed at`
-   columns, exceptions, unavailable checks, and numbered findings.
+7. Per-repository evidence: identity, performance audit coverage and handoff, a check table
+   with `Evidence origin` and `Observed at` columns, exceptions, unavailable checks, and
+   numbered findings.
 8. Remediation prompts: one prompt per `Non-conforming` repository; none for compliant or
    merely incomplete repositories.
 9. Audit actions ledger recording read-only checks and confirming that no remediation ran.

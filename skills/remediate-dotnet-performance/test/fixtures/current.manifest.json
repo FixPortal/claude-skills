@@ -1,0 +1,43 @@
+{
+  "schemaVersion": 1,
+  "repository": {
+    "path": "<workdir>\\sample",
+    "head": "0123456789abcdef",
+    "branch": "main"
+  },
+  "audit": {
+    "startedUtc": "2026-08-26T09:00:00Z",
+    "completedUtc": "2026-08-26T09:05:00Z",
+    "targetStateUnchanged": true
+  },
+  "findings": [
+    {
+      "id": "PERF-001",
+      "title": "Avoid duplicate formatting",
+      "classification": "Observed bottleneck",
+      "confidence": "High",
+      "resolutionState": "unresolved",
+      "evidence": ["Representative workload", "Trace attribution"],
+      "project": "src/Library",
+      "files": ["src/Library/Formatter.cs"],
+      "symbols": ["Formatter.Format"],
+      "workload": { "id": "format", "baseline": "5 ms p95" },
+      "attributedMechanism": "Duplicate formatting on the request path.",
+      "proposedExperiment": "Cache the stable format.",
+      "correctnessInvariants": ["Existing unit test"],
+      "expectedTradeoffs": ["Retains one cached value."],
+      "materialityThreshold": "At least 5 percent.",
+      "commands": { "baseline": "dotnet run -- baseline", "candidate": "dotnet run -- candidate" },
+      "requiredTools": ["dotnet"],
+      "requiredArtifacts": ["raw/format.json"],
+      "cost": { "inputs": ["cpu-seconds / operation"], "missingInputs": ["currency rate"] },
+      "productBoundary": {
+        "allowed": "managed-public-api",
+        "exclusions": ["unsafe", "System.Runtime.Intrinsics", "DllImport", "LibraryImport", "PInvoke", "native binaries", "native-dependent packages", "custom native allocators", "undocumented runtime switches", "runtime-private APIs", "reflection/runtime patching"]
+      },
+      "acceptanceConditions": ["Correctness passes and benefit exceeds threshold."],
+      "rejectionConditions": ["Regression, boundary failure, or no material benefit."],
+      "rollbackExpectation": "Remove the candidate change."
+    }
+  ]
+}
