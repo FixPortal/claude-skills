@@ -140,10 +140,16 @@ Contents:
   Phase 4 evidence, chunk coverage;
 - `working/` — per-phase transcripts and the judge packet.
 
+**`report.md` carries every finding, every severity — never a curated subset.**
+Rank freely; never omit to shorten. Only REFUTED or same-report duplication
+removes one. A Low stays with its file:line evidence, never dropped for being
+low priority. Chunked synthesis: re-read the assembled report and confirm its
+count matches each chunk's adjudication.
+
 Resolve `<vault>` from the runtime's active user instructions; do not hardcode a
 drive letter, then gate the run folder with `validate-report.ps1`; fix and re-run
-until clean. The chat response leads with Critical/High findings, contested items,
-evidence gaps, and the report path.
+until clean. The chat response leads with Critical/High, contested items, and
+evidence gaps — the report itself must not lead-and-drop.
 
 Review is read-only. Remediation is a separate approved pass in the dedicated
 review worktree.
