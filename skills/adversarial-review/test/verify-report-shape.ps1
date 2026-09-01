@@ -72,6 +72,58 @@ if ($accepted.Code -ne 0) {
     throw "validator rejected a legitimate report (or failed to exclude working/)`n$($accepted.Output)"
 }
 
+$coverageRoot = Join-Path ([IO.Path]::GetTempPath()) "adversarial-coverage-$([guid]::NewGuid().ToString('N'))"
+try {
+    $repo = Join-Path $coverageRoot 'repo'
+    New-Item -ItemType Directory -Force -Path $repo | Out-Null
+    & git init --quiet $repo
+    & git -C $repo config user.email 'fixture@example.test'
+    & git -C $repo config user.name 'Coverage Fixture'
+    New-Item -ItemType Directory -Force -Path (Join-Path $repo 'src'), (Join-Path $repo 'tests') | Out-Null
+    Set-Content (Join-Path $repo 'README.md') 'base'
+    & git -C $repo add README.md
+    & git -C $repo commit --quiet -m 'base'
+    $baseSha = (& git -C $repo rev-parse HEAD).Trim()
+    Set-Content (Join-Path $repo 'src/App.cs') 'reviewed'
+    Set-Content (Join-Path $repo 'tests/AppTests.cs') 'excluded'
+    & git -C $repo add src/App.cs tests/AppTests.cs
+    & git -C $repo commit --quiet -m 'tip'
+    $tipSha = (& git -C $repo rev-parse HEAD).Trim()
+
+    function New-CoverageRun([string] $Name, [string[]] $IndexLines) {
+        $run = Join-Path $coverageRoot $Name
+        New-Item -ItemType Directory -Force -Path $run | Out-Null
+        $IndexLines | Set-Content (Join-Path $run '_index.md')
+        '# report' | Set-Content (Join-Path $run 'report.md')
+        return $run
+    }
+
+    $goodCoverage = New-CoverageRun 'good-coverage' @(
+        '---', 'project: fixture', 'review-type: adversarial-review', 'date: 2026-01-01',
+        'scope-kind: repository', "target: $baseSha..$tipSha", 'reviewed-paths:', '  - src/**',
+        'excluded-paths:', '  - tests/**', 'disposition: remediated', "remediation-tip: $tipSha", '---'
+    )
+    $symbolicCoverage = New-CoverageRun 'symbolic-coverage' @(
+        '---', 'project: fixture', 'review-type: adversarial-review', 'date: 2026-01-01',
+        'scope-kind: repository', "target: $baseSha..HEAD", 'disposition: remediated', "remediation-tip: $tipSha", '---'
+    )
+    $uncoveredCoverage = New-CoverageRun 'uncovered-coverage' @(
+        '---', 'project: fixture', 'review-type: adversarial-review', 'date: 2026-01-01',
+        'scope-kind: repository', "target: $baseSha..$tipSha", 'reviewed-paths:', '  - src/**',
+        'disposition: remediated', "remediation-tip: $tipSha", '---'
+    )
+
+    $goodCoverageResult = & pwsh -NoProfile -File $validator -Path $goodCoverage -RepoPath $repo 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) { throw "validator rejected complete machine-readable coverage`n$goodCoverageResult" }
+    $symbolicResult = & pwsh -NoProfile -File $validator -Path $symbolicCoverage -RepoPath $repo 2>&1 | Out-String
+    if ($LASTEXITCODE -eq 0 -or $symbolicResult -notmatch 'exact immutable target') { throw "validator accepted symbolic HEAD coverage`n$symbolicResult" }
+    $uncoveredResult = & pwsh -NoProfile -File $validator -Path $uncoveredCoverage -RepoPath $repo 2>&1 | Out-String
+    if ($LASTEXITCODE -eq 0 -or $uncoveredResult -notmatch 'uncovered path') { throw "validator accepted incomplete repository coverage`n$uncoveredResult" }
+}
+finally {
+    Remove-Item -LiteralPath $coverageRoot -Recurse -Force -ErrorAction SilentlyContinue
+}
+
 # An unreferenced validator never fires. The persist step is the only place that can
 # catch this, because the report is hand-assembled rather than rendered by a script.
 $skill = Get-Content (Join-Path $root 'SKILL.md') -Raw

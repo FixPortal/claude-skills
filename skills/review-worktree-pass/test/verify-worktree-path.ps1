@@ -49,6 +49,15 @@ if ($text -match 'origin/main') {
     throw 'SKILL.md must not hard-code origin/main as the project mainline'
 }
 
+foreach ($needle in 'disposition: remediated', 'remediation-tip:', 'validate-report.ps1', '-RepoPath') {
+    if ($text -notmatch [regex]::Escape($needle)) {
+        throw "SKILL.md does not close the machine-readable review artefact after remediation: $needle"
+    }
+}
+if ($text -notmatch '(?is)only after.*all.*findings.*fixed.*declined.*deferred') {
+    throw 'Review artefact must close only after every finding has a recorded disposition.'
+}
+
 $fetch = $normalized.IndexOf('`git fetch --prune`', [System.StringComparison]::Ordinal)
 $resolve = $normalized.IndexOf('origin/HEAD', [System.StringComparison]::Ordinal)
 $batch = $normalized.IndexOf('select the next batch number', [System.StringComparison]::Ordinal)

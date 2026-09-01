@@ -83,6 +83,16 @@ Recreate them from scratch (`git worktree add` + branch from the verified
 `<mainline-ref>`) at
 the start of the next review.
 
+## Close the review artefact
+
+Only after all findings are fixed, declined with reasoning, or explicitly deferred,
+update the source run's `_index.md` from `disposition: reviewed` to
+`disposition: remediated` and add `remediation-tip: <40-character mainline SHA>`.
+Use the post-merge commit on the refreshed verified mainline, then run the review
+producer's `validate-report.ps1 -Path <run-folder> -RepoPath <repo>`. Do not close
+the artefact while any finding lacks a disposition. This machine closure supersedes
+generated handoff prompts; historical ledger files remain immutable.
+
 Stale-after-merge cleanup (pre-authorised post-merge tidy): before deleting the
 branch, confirm it is genuinely merged using the rebase-merge fingerprint from
 the *Pull request merge style* rule: **both** the remote branch is gone and the

@@ -132,10 +132,21 @@ Write the final report additively to
 `vault.exists` false, so the report is never discovered and successive runs collide.
 Contents:
 
-- `_index.md` — `project`, `review-type`, `date`, `target`, `reviewers`, `judge`,
-  severity tally, and `subsystem: <pathspec>` when the target was
-  `audit -- <pathspec>`. Omitting `subsystem` makes a one-subsystem pass establish a
-  **repo-wide** boundary, and every unexamined subsystem then reads as reviewed;
+- `_index.md` — metadata, severity tally, and:
+
+  ```yaml
+  scope-kind: repository # subsystem/document
+  target: <base-sha>..<reviewed-tip-sha>
+  reviewed-paths:
+    - src/**
+  excluded-paths:
+    - generated/**
+  disposition: reviewed # open/reviewed/remediated
+  ```
+
+  Resolve target endpoints to SHAs; never persist symbolic `HEAD`. `scope-kind` is
+  authoritative: tiled chunks are `repository`; partial coverage is `subsystem`
+  and lists exact paths. Put rationale in `scope-note:`. `subsystem:` is legacy-read-only.
 - `report.md` — target, manifest-derived participants, findings, vendor consensus,
   Phase 4 evidence, chunk coverage;
 - `working/` — per-phase transcripts and the judge packet.
@@ -147,7 +158,8 @@ low priority. Chunked synthesis: re-read the assembled report and confirm its
 count matches each chunk's adjudication.
 
 Resolve `<vault>` from the runtime's active user instructions; do not hardcode a
-drive letter, then gate the run folder with `validate-report.ps1`; fix and re-run
+drive letter, then gate the run folder with `validate-report.ps1 -Path <run-folder>
+-RepoPath <repo>`; it validates exact targets and path coverage. Fix and re-run
 until clean. The chat response leads with Critical/High, contested items, and
 evidence gaps — the report itself must not lead-and-drop.
 
