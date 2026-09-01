@@ -38,16 +38,44 @@ else {
 }
 if (-not $repos) { Write-Error "No git repos under $Path"; exit 3 }
 
+function Test-IsDocumentReviewText {
+  param([string]$Text)
+  if ($Text -match '(?im)^scope-kind:\s*document\s*$') { return $true }
+  $rt = [regex]::Match($Text, '(?im)^review-type:\s*(.+)$')
+  if ($rt.Success -and $rt.Groups[1].Value -match '(?i)\b(plan|document)[- ]audit\b|\bdocument[- ]review\b') { return $true }
+  $gm = [regex]::Match($Text, '(?im)^-?\s*target:\s*(.+)$')
+  if (-not $gm.Success) { return $false }
+  $target = $gm.Groups[1].Value.Trim()
+  if ($target -match '^([''"])(.*)\1$') { $target = $Matches[2] }
+  return $target -match '\.(html?|pdf|docx?|md|txt|rtf|odt)\s*$' -or
+    $target -match '(?i)^\s*(design|proposal|specification|document)\b\s*[-—:]'
+}
+
+function Test-IsSubsystemRunText {
+  param([string]$Text)
+  $kind = [regex]::Match($Text, '(?im)^scope-kind:\s*(repository|subsystem|document)\s*$')
+  if ($kind.Success) { return $kind.Groups[1].Value -eq 'subsystem' }
+  return [regex]::IsMatch($Text, '(?im)^subsystem:') -or
+    [regex]::IsMatch($Text, '(?im)^target:\s*audit\s+--\s+\S')
+}
+
 function Get-VaultData {
   param([string]$RepoName, [string]$VaultRoot)
-  $empty = [pscustomobject]@{ exists = $false; indexPath = $null; runName = $null; reviewers = @(); judge = $null; date = $null; reviewType = $null; tally = $null; reportFiles = @(); reviewTarget = $null; reviewScope = $null; isDocumentReview = $false; subsystemPath = $null; subsystemPaths = @() }
+  $empty = [pscustomobject]@{ exists = $false; indexPath = $null; runName = $null; reviewers = @(); judge = $null; date = $null; reviewType = $null; scopeKind = $null; disposition = $null; remediationTip = $null; tally = $null; reportFiles = @(); reviewTarget = $null; reviewScope = $null; isDocumentReview = $false; subsystemPath = $null; subsystemPaths = @(); excludedPaths = @() }
   $repoDir = Join-Path $VaultRoot $RepoName
   if (-not (Test-Path $repoDir)) { return $empty }
   # Each run is a timestamped subfolder holding _index.md. Pick the run with the newest frontmatter date (fallback: folder mtime).
   $runs = Get-ChildItem $repoDir -Directory | Where-Object { Test-Path (Join-Path $_.FullName '_index.md') }
   if (-not $runs) { return $empty }
+  $codeRuns = @($runs | Where-Object {
+    -not (Test-IsDocumentReviewText -Text (Get-Content (Join-Path $_.FullName '_index.md') -Raw))
+  })
+  $wholeRepoRuns = @($codeRuns | Where-Object {
+    -not (Test-IsSubsystemRunText -Text (Get-Content (Join-Path $_.FullName '_index.md') -Raw))
+  })
+  $selectable = if ($wholeRepoRuns.Count) { $wholeRepoRuns } elseif ($codeRuns.Count) { $codeRuns } else { $runs }
   $best = $null; $bestDate = [datetime]::MinValue; $bestName = ''
-  foreach ($run in $runs) {
+  foreach ($run in $selectable) {
     $idx = Join-Path $run.FullName '_index.md'
     [datetime]$fmDate = [datetime]::MinValue
     $head = Get-Content $idx -TotalCount 12
@@ -73,6 +101,10 @@ function Get-VaultData {
   $jm = [regex]::Match($text, '(?im)^judge:\s*(.+)$');        if ($jm.Success) { $judge = $jm.Groups[1].Value.Trim() }
   $dm2 = [regex]::Match($text, '(?im)^date:\s*(\d{4}-\d{2}-\d{2})'); if ($dm2.Success) { $date = $dm2.Groups[1].Value }
   $tm = [regex]::Match($text, '(?im)^review-type:\s*(.+)$');  if ($tm.Success) { $reviewType = $tm.Groups[1].Value.Trim() }
+  $scopeKind = $null; $disposition = $null; $remediationTip = $null
+  $km = [regex]::Match($text, '(?im)^scope-kind:\s*(repository|subsystem|document)\s*$'); if ($km.Success) { $scopeKind = $km.Groups[1].Value }
+  $disp = [regex]::Match($text, '(?im)^disposition:\s*(open|reviewed|remediated)\s*$'); if ($disp.Success) { $disposition = $disp.Groups[1].Value }
+  $rem = [regex]::Match($text, '(?im)^remediation-tip:\s*([0-9a-f]{40})\s*$'); if ($rem.Success) { $remediationTip = $rem.Groups[1].Value }
   # A review's TARGET distinguishes a code review from a DOCUMENT review. resumes-cv carries
   # `target: your-cv.html` — a CV, not code. Without recording this, the resolver
   # credits a document review as code coverage and the ledger keeps ranking a reviewed CV as an
@@ -83,7 +115,7 @@ function Get-VaultData {
   # Strip a surrounding matched YAML quote so `target: "report.pdf"` still hits the extension test.
   if ($reviewTarget -match '^([''"])(.*)\1$') { $reviewTarget = $Matches[2] }
   if ($reviewScope -match '^([''"])(.*)\1$') { $reviewScope = $Matches[2] }
-  if ($reviewTarget -and $reviewTarget -match '\.(html?|pdf|docx?|md|txt|rtf|odt)\s*$') { $isDocumentReview = $true }
+  $isDocumentReview = Test-IsDocumentReviewText -Text $text
   # Tally: prefer a "## Tally" section; support inline "Label: N" and table "| Label | N |" forms.
   $tallyScope = if ($text -match '(?s)##\s*Tally[^\n]*\n(.*?)(?=\n##|\z)') { $Matches[1] } else { $text }
   $tally = $null
@@ -105,8 +137,23 @@ function Get-VaultData {
   # Preferred source is an explicit `subsystem:` key; failing that, an `audit -- <pathspec>`
   # target names its own scope.
   $subsystemPaths = @()
+  $excludedPaths = @()
+  if ($scopeKind -eq 'subsystem') {
+    $rpm = [regex]::Match($text, '(?im)^reviewed-paths:[ \t]*\r?\n((?:[ \t]+-[ \t]*.+\r?\n?)+)')
+    if ($rpm.Success) {
+      $subsystemPaths = @($rpm.Groups[1].Value -split '\r?\n' |
+        ForEach-Object { ($_ -replace '^[ \t]+-[ \t]*', '').Trim().Trim('"', "'", '`') } |
+        Where-Object { $_ })
+    }
+  }
+  $epm = [regex]::Match($text, '(?im)^excluded-paths:[ \t]*\r?\n((?:[ \t]+-[ \t]*.+\r?\n?)+)')
+  if ($epm.Success) {
+    $excludedPaths = @($epm.Groups[1].Value -split '\r?\n' |
+      ForEach-Object { ($_ -replace '^[ \t]+-[ \t]*', '').Trim().Trim('"', "'", '`') } |
+      Where-Object { $_ })
+  }
   $sm2 = [regex]::Match($text, '(?im)^subsystem:[ \t]*(.*)$')
-  if ($sm2.Success) {
+  if (-not $scopeKind -and $sm2.Success) {
     $inline = $sm2.Groups[1].Value.Trim()
     if ($inline -match '^\[(.*)\]$') {
       $subsystemPaths = @($Matches[1] -split ',' | ForEach-Object { $_.Trim().Trim('"', "'", '`') } | Where-Object { $_ })
@@ -121,12 +168,12 @@ function Get-VaultData {
       }
     }
   }
-  if (-not $subsystemPaths.Count -and $reviewTarget -match '(?i)^\s*audit\s+--\s+(.+?)\s*$') {
+  if (-not $scopeKind -and -not $subsystemPaths.Count -and $reviewTarget -match '(?i)^\s*audit\s+--\s+(.+?)\s*$') {
     $subsystemPaths = @($Matches[1].Trim().Trim('"', "'", '`'))
   }
   $subsystemPath = if ($subsystemPaths.Count -eq 1) { $subsystemPaths[0] } else { $null }
   $reports = @(Get-ChildItem $best.FullName -Filter 'report*.md' | Select-Object -ExpandProperty Name)
-  [pscustomobject]@{ exists = $true; indexPath = $idx; runName = $best.Name; reviewers = $reviewers; judge = $judge; date = $date; reviewType = $reviewType; tally = $tally; reportFiles = $reports; reviewTarget = $reviewTarget; reviewScope = $reviewScope; isDocumentReview = $isDocumentReview; subsystemPath = $subsystemPath; subsystemPaths = @($subsystemPaths) }
+  [pscustomobject]@{ exists = $true; indexPath = $idx; runName = $best.Name; reviewers = $reviewers; judge = $judge; date = $date; reviewType = $reviewType; scopeKind = $scopeKind; disposition = $disposition; remediationTip = $remediationTip; tally = $tally; reportFiles = $reports; reviewTarget = $reviewTarget; reviewScope = $reviewScope; isDocumentReview = $isDocumentReview; subsystemPath = $subsystemPath; subsystemPaths = @($subsystemPaths); excludedPaths = @($excludedPaths) }
 }
 
 # Resolve a vault folder to the code it actually reviewed, via the file:/// links its

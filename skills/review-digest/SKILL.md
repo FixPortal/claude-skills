@@ -47,6 +47,12 @@ repo), `hasTrackedSource` (tri-state: true/false for a verified probe — false 
 repo — and **null when the `git ls-files` probe itself failed**: that is UNKNOWN, never a
 verified "no source"), and `outsideScanPath`.
 
+New review indexes declare `scope-kind: repository|subsystem|document`, an exact
+`target: <base-sha>..<tip-sha>`, `disposition`, and optional `remediation-tip`.
+`scope-kind` wins over legacy inference: a newer subsystem pass never displaces an
+older repository boundary, while a chunked `repository` pass can. Symbolic `HEAD`
+remains a conservative legacy boundary and cannot certify completion.
+
 Subsystem evidence also carries `subsystemPaths` (zero or more Git pathspecs) and
 `scopeValidation`: `none` for a whole-repo review, `valid` when every declared or derived
 pathspec selects tracked files, `invalid` when any pathspec selects none, and `unknown` for an
@@ -284,6 +290,7 @@ For a **never-reviewed** repo the scope line becomes the whole repo (HEAD) with 
 
 The hand-off report is **propose / READ-ONLY** like the digest: it names what an
 agent *should* review; it runs no review and touches no scanned repo.
+It is a generated projection, never authoritative outstanding-work state.
 
 ## Rendering rules for partial vault data
 

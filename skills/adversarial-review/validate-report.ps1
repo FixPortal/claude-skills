@@ -31,7 +31,10 @@
 param(
     # A run folder (recursed, `working/` excluded) or individual markdown files.
     [Parameter(Mandatory)]
-    [string[]] $Path
+    [string[]] $Path,
+
+    # Required when a run folder contains the machine-readable coverage schema.
+    [string] $RepoPath
 )
 
 $ErrorActionPreference = 'Stop'
@@ -65,6 +68,16 @@ $files = @(
     }
 )
 
+$indexes = @(
+    foreach ($p in $Path) {
+        if (Test-Path -LiteralPath $p -PathType Container) {
+            Get-ChildItem -LiteralPath $p -File -Filter '_index.md'
+        } elseif ((Split-Path $p -Leaf) -eq '_index.md') {
+            Get-Item -LiteralPath $p
+        }
+    }
+)
+
 # An empty file set is the fail-open shape this whole check exists to avoid: a clean
 # exit over nothing reads identically to a clean exit over a validated report.
 if (-not $files) { throw "no markdown deliverables found under: $($Path -join ', ')" }
@@ -73,7 +86,7 @@ if (-not $files) { throw "no markdown deliverables found under: $($Path -join ',
 # per-line match cannot see a leak whose `$(` and `@{` land either side of a newline -
 # it would report clean on the very defect it exists to catch. Both patterns tolerate
 # whitespace at their seams, and `\s` spans a newline only when the text is matched whole.
-$violations = foreach ($file in $files) {
+$violations = @(foreach ($file in $files) {
     $text = Get-Content -LiteralPath $file.FullName -Raw
     if (-not $text) { continue }
     foreach ($rule in $rules) {
@@ -87,6 +100,83 @@ $violations = foreach ($file in $files) {
                 Rule    = $rule.Name
                 Message = $rule.Message
                 Text    = ($window -replace '\s+', ' ').Trim()
+            }
+        }
+    }
+})
+
+function Get-Scalar([string] $Text, [string] $Name) {
+    $m = [regex]::Match($Text, "(?im)^$([regex]::Escape($Name)):\s*(.+?)\s*$")
+    if ($m.Success) { return $m.Groups[1].Value.Trim().Trim('"', "'") }
+    return $null
+}
+
+function Get-List([string] $Text, [string] $Name) {
+    $m = [regex]::Match($Text, "(?im)^$([regex]::Escape($Name)):[ \t]*\r?\n((?:[ \t]+-[ \t]*.+\r?\n?)+)")
+    if (-not $m.Success) { return @() }
+    return @($m.Groups[1].Value -split '\r?\n' |
+        ForEach-Object { ($_ -replace '^[ \t]+-[ \t]*', '').Trim().Trim('"', "'", '`') } |
+        Where-Object { $_ })
+}
+
+foreach ($index in $indexes) {
+    $indexText = Get-Content -LiteralPath $index.FullName -Raw
+    $scopeKind = Get-Scalar $indexText 'scope-kind'
+    if (-not $scopeKind) { continue }
+    if ($scopeKind -notin 'repository', 'subsystem', 'document') {
+        $violations += [pscustomobject]@{ File = $index.FullName; Line = 1; Rule = 'coverage-schema'; Message = "invalid scope-kind '$scopeKind'"; Text = '' }
+        continue
+    }
+    if ($scopeKind -eq 'document') { continue }
+    if (-not $RepoPath -or -not (Test-Path -LiteralPath (Join-Path $RepoPath '.git'))) {
+        $violations += [pscustomobject]@{ File = $index.FullName; Line = 1; Rule = 'coverage-schema'; Message = 'RepoPath is required for code coverage validation'; Text = '' }
+        continue
+    }
+    $target = Get-Scalar $indexText 'target'
+    $targetMatch = [regex]::Match("$target", '^([0-9a-f]{40})\.\.([0-9a-f]{40})$')
+    if (-not $targetMatch.Success) {
+        $violations += [pscustomobject]@{ File = $index.FullName; Line = 1; Rule = 'coverage-schema'; Message = 'completed code review requires an exact immutable target <base-sha>..<tip-sha>'; Text = "$target" }
+        continue
+    }
+    $baseSha = $targetMatch.Groups[1].Value
+    $tipSha = $targetMatch.Groups[2].Value
+    foreach ($sha in $baseSha, $tipSha) {
+        & git -C $RepoPath cat-file -e "$sha^{commit}" 2>$null
+        if ($LASTEXITCODE -ne 0) {
+            $violations += [pscustomobject]@{ File = $index.FullName; Line = 1; Rule = 'coverage-schema'; Message = "target commit does not exist in RepoPath: $sha"; Text = '' }
+        }
+    }
+    $disposition = Get-Scalar $indexText 'disposition'
+    if ($disposition -notin 'open', 'reviewed', 'remediated') {
+        $violations += [pscustomobject]@{ File = $index.FullName; Line = 1; Rule = 'coverage-schema'; Message = 'disposition must be open, reviewed, or remediated'; Text = "$disposition" }
+    }
+    if ($disposition -eq 'remediated') {
+        $remediationTip = Get-Scalar $indexText 'remediation-tip'
+        if ($remediationTip -notmatch '^[0-9a-f]{40}$') {
+            $violations += [pscustomobject]@{ File = $index.FullName; Line = 1; Rule = 'coverage-schema'; Message = 'remediated review requires an exact remediation-tip SHA'; Text = "$remediationTip" }
+        } else {
+            & git -C $RepoPath cat-file -e "$remediationTip^{commit}" 2>$null
+            if ($LASTEXITCODE -ne 0) {
+                $violations += [pscustomobject]@{ File = $index.FullName; Line = 1; Rule = 'coverage-schema'; Message = "remediation-tip does not exist in RepoPath: $remediationTip"; Text = '' }
+            }
+        }
+    }
+    $reviewedPaths = @(Get-List $indexText 'reviewed-paths')
+    $excludedPaths = @(Get-List $indexText 'excluded-paths')
+    if ($scopeKind -eq 'subsystem' -and -not $reviewedPaths.Count) {
+        $violations += [pscustomobject]@{ File = $index.FullName; Line = 1; Rule = 'coverage-schema'; Message = 'subsystem review requires reviewed-paths'; Text = '' }
+    }
+    if ($scopeKind -eq 'repository' -and $reviewedPaths.Count) {
+        $changed = @(& git -C $RepoPath diff --name-only "$baseSha..$tipSha")
+        $accounted = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+        foreach ($pathspec in @($reviewedPaths) + @($excludedPaths)) {
+            foreach ($file in @(& git -C $RepoPath diff --name-only "$baseSha..$tipSha" -- $pathspec)) {
+                [void]$accounted.Add("$file")
+            }
+        }
+        foreach ($file in $changed) {
+            if (-not $accounted.Contains("$file")) {
+                $violations += [pscustomobject]@{ File = $index.FullName; Line = 1; Rule = 'coverage-schema'; Message = "uncovered path in repository review: $file"; Text = '' }
             }
         }
     }

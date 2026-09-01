@@ -29,6 +29,7 @@ $scanRepo = Join-Path $scanRoot 'placeholder'
 $scopeRepo = Join-Path $scanRoot 'scope-quoted'
 $markerRepo = Join-Path $scanRoot 'marker-only'
 $multiScopeRepo = Join-Path $scanRoot 'multi-scope'
+$scopeKindRepo = Join-Path $scanRoot 'scope-kind-selection'
 $invalidScopeRepo = Join-Path $scanRoot 'invalid-scope'
 $invalidBaseRepo = Join-Path $scanRoot 'invalid-base'
 $brokenSourceRepo = Join-Path $scanRoot 'broken-source-probe'
@@ -94,7 +95,7 @@ function New-FixtureCommit {
 # the .git assertion), and anything thrown outside it would bypass finally and strand the
 # fixture directories on disk.
 try {
-    foreach ($r in @($linkRepo, $spacedRepo, $appRepo, $appOldRepo, $scanRepo, $scopeRepo, $markerRepo, $quotedRepo, $predateRepo, $multiScopeRepo, $invalidScopeRepo, $invalidBaseRepo) + @($sourceFixtures | ForEach-Object path)) {
+    foreach ($r in @($linkRepo, $spacedRepo, $appRepo, $appOldRepo, $scanRepo, $scopeRepo, $markerRepo, $quotedRepo, $predateRepo, $multiScopeRepo, $scopeKindRepo, $invalidScopeRepo, $invalidBaseRepo) + @($sourceFixtures | ForEach-Object path)) {
         New-Item -ItemType Directory -Force -Path $r | Out-Null
         & git init --quiet $r 2>$null | Out-Null
         if ($LASTEXITCODE -ne 0) { throw "git init failed (exit $LASTEXITCODE) for fixture repo '$r'" }
@@ -141,6 +142,9 @@ try {
     $multiReviewSha = New-FixtureCommit -Repo $multiScopeRepo -File 'src/Reviewed.cs' -Subject 'reviewer-findings batch 9: fix scoped source' -Date '2026-01-02T12:00:00Z'
     New-FixtureCommit -Repo $multiScopeRepo -File 'tools/Outside.cs' -Subject 'reviewer-findings batch 10: outside declared scope' -Date '2026-01-03T12:00:00Z' | Out-Null
     $multiHeadSha = New-FixtureCommit -Repo $multiScopeRepo -File 'samples/YourOrg.Demo.Host/Program.cs' -Subject 'feat: add scoped sample' -Date '2026-01-04T12:00:00Z'
+    $scopeKindBase = New-FixtureCommit -Repo $scopeKindRepo -File 'README.md' -Subject 'chore: initial fixture' -Date '2026-01-01T12:00:00Z'
+    $scopeKindWholeTip = New-FixtureCommit -Repo $scopeKindRepo -File 'src/Whole.cs' -Subject 'feat: whole-repo reviewed change' -Date '2026-01-02T12:00:00Z'
+    $scopeKindSubsystemTip = New-FixtureCommit -Repo $scopeKindRepo -File 'src/Partial.cs' -Subject 'feat: later subsystem review' -Date '2026-01-03T12:00:00Z'
     $invalidBaseSha = New-FixtureCommit -Repo $invalidScopeRepo -File 'README.md' -Subject 'chore: initial fixture'
     New-FixtureCommit -Repo $invalidScopeRepo -File 'src/App.cs' -Subject 'reviewer-findings batch 11: fix real source' | Out-Null
     New-FixtureCommit -Repo $invalidBaseRepo -File 'README.md' -Subject 'chore: initial fixture' -Date '2026-01-01T12:00:00Z' | Out-Null
@@ -211,6 +215,23 @@ try {
         '  - src/**', '  - samples/YourOrg.Demo.Host/**',
         'reviewers: [Fixture]', '---', '', '# Fixture', ''
     ) | Set-Content (Join-Path $multiRun '_index.md')
+    $scopeKindWholeRun = Join-Path $fixtureVault 'scope-kind-selection' '20260102T180000Z'
+    New-Item -ItemType Directory -Force -Path $scopeKindWholeRun | Out-Null
+    @(
+        '---', 'project: scope-kind-selection', 'review-type: adversarial-review',
+        'date: 2026-01-02', 'scope-kind: repository',
+        "target: $scopeKindBase..$scopeKindWholeTip", 'disposition: remediated',
+        "remediation-tip: $scopeKindWholeTip", 'reviewers: [Fixture]', '---', '', '# Fixture', ''
+    ) | Set-Content (Join-Path $scopeKindWholeRun '_index.md')
+    $scopeKindPartialRun = Join-Path $fixtureVault 'scope-kind-selection' '20260103T180000Z'
+    New-Item -ItemType Directory -Force -Path $scopeKindPartialRun | Out-Null
+    @(
+        '---', 'project: scope-kind-selection', 'review-type: adversarial-review',
+        'date: 2026-01-03', 'scope-kind: subsystem',
+        "target: $scopeKindWholeTip..$scopeKindSubsystemTip", 'reviewed-paths:', '  - src/**',
+        'disposition: remediated', "remediation-tip: $scopeKindSubsystemTip",
+        'reviewers: [Fixture]', '---', '', '# Fixture', ''
+    ) | Set-Content (Join-Path $scopeKindPartialRun '_index.md')
     $invalidBaseRun = Join-Path $fixtureVault 'invalid-base' '20260102T180000Z'
     New-Item -ItemType Directory -Force -Path $invalidBaseRun | Out-Null
     @(
@@ -291,6 +312,11 @@ try {
     if ($quotedScope.scopeValidation -ne 'valid' -or @($quotedScope.subsystemPaths).Count -ne 1 -or $quotedScope.subsystemPaths[0] -ne 'src/**') { throw "scalar subsystem pathspec must validate and remain a one-item list" }
     if ($quotedScope.git.boundarySha -ne $scopeReviewedTip) { throw "quoted scope range must anchor at reviewed tip '$scopeReviewedTip', got '$($quotedScope.git.boundarySha)'" }
     if ($quotedScope.git.boundarySource -ne 'vault-target') { throw "quoted scope range boundarySource should be 'vault-target', got '$($quotedScope.git.boundarySource)'" }
+
+    $scopeKind = $fx | Where-Object { $_.repo -eq 'scope-kind-selection' }
+    if (-not $scopeKind) { throw "fixture 'scope-kind-selection' produced no row" }
+    if ($scopeKind.vault.scopeKind -ne 'repository') { throw 'newer explicit subsystem review must not displace the older repository review' }
+    if ($scopeKind.git.boundarySha -ne $scopeKindWholeTip) { throw "explicit subsystem review must preserve repository boundary '$scopeKindWholeTip', got '$($scopeKind.git.boundarySha)'" }
 
     $multiScope = $fx | Where-Object { $_.repo -eq 'multi-scope' }
     if (-not $multiScope) { throw "fixture 'multi-scope' produced no row" }
