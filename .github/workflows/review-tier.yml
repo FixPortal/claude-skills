@@ -77,13 +77,26 @@ jobs:
             $high && break
           done <<< "$files"
 
-          labelled=$(gh pr view "$PR_NUMBER" --json labels --jq '.labels[].name' | grep -cx 'review-high' || true)
+          # --repo is REQUIRED on every one of these. This job runs under
+          # pull_request_target and deliberately never checks the repository out (see
+          # TARGET_TRIGGER_NO_CHECKOUT in the hygiene checker), so `gh` has no git
+          # context to infer the repository from and fails with
+          # "failed to run git: fatal: not a git repository". The `gh api` calls above
+          # already pass $GITHUB_REPOSITORY explicitly; these did not.
+          #
+          # That went unnoticed for eleven runs because none of them classified HIGH:
+          # `gh pr view` here is masked by `|| true`, and the two `gh pr edit` calls are
+          # only reached when the label actually has to change. The first HIGH-tier PR in
+          # this repository was the first to reach them, and it failed the check --
+          # meaning the review-high label had never once been applied, and CodeRabbit,
+          # which is label-triggered, could never have run on a HIGH PR here.
+          labelled=$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json labels --jq '.labels[].name' | grep -cx 'review-high' || true)
 
           if $high; then
             echo "HIGH tier: at least one changed path matches the policy's high list."
-            gh label create review-high --force --description "HIGH review tier: CodeRabbit review required" >/dev/null
+            gh label create review-high --repo "$GITHUB_REPOSITORY" --force --description "HIGH review tier: CodeRabbit review required" >/dev/null
             if [ "$labelled" -eq 0 ]; then
-              gh pr edit "$PR_NUMBER" --add-label review-high
+              gh pr edit "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --add-label review-high
               echo "Applied the review-high label."
             else
               echo "The review-high label is already present."
@@ -91,7 +104,7 @@ jobs:
           else
             echo "Not HIGH: no changed path matches the policy's high list."
             if [ "$labelled" -gt 0 ]; then
-              gh pr edit "$PR_NUMBER" --remove-label review-high
+              gh pr edit "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --remove-label review-high
               echo "Removed the review-high label."
             fi
           fi
