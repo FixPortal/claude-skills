@@ -24,7 +24,9 @@
     ".github/scripts/assert_workflow_hygiene.py",
     ".claude/review-policy.json",
     ".coderabbit.yaml",
-    ".github/dependabot.yml"
+    ".github/dependabot.yml",
+    ".github/workflows/ci.yml",
+    ".github/scripts/assert_gate_coverage.py"
   ],
   "low": [
     "README.md",
