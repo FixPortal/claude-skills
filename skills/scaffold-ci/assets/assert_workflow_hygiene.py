@@ -1,29 +1,38 @@
 #!/usr/bin/env python3
-"""Assert workflow hygiene structurally: no target-context trigger, no blanket
-write token, third-party actions pinned to an immutable ref.
+"""Fails when a workflow in .github/workflows breaches the house hygiene bar.
 
-This replaces three line-anchored `grep` assertions. They were bypassable by
-ORDINARY block-style YAML, not by any evasion technique: a value may sit on the
-line after its key, so
+Checked here rather than by a reviewer, because these are properties a glob-tiered
+review was never reliably catching:
 
-    permissions:
-      write-all
+  * no target-context trigger (`pull_request_target`, `workflow_run`) -- both run in
+    the BASE repo's context with its secrets and a write-scoped token, while able to
+    reach attacker-controlled head code;
+  * no blanket `write-all` token, at workflow or job scope;
+  * every third-party action AND container image pinned to an immutable revision.
 
-resolves to exactly what `permissions: write-all` resolves to, while matching
-neither the key-anchored `permissions:.*write-all` pattern nor anything else the
-guard looked for. The same held for a `uses:` split across two lines, which never
-reached the pin check at all. Demonstrated 2026-08-22: both greps returned no
-match on a file PyYAML resolves to `permissions: 'write-all'` and
-`uses: 'third/party@v1'`.
+PARSED, NOT GREPPED. The greps this replaced carried a self-match hazard -- the
+pattern for a rule matched the comment explaining the rule, so the guard failed in
+every repo it was installed into -- and they were simultaneously too loose (prose
+tripped them) and too tight (a quoted value, a list-form trigger, or a digest-pinned
+ref read as a violation, or as clean, wrongly).
 
-Parsing also removes the self-match hazard the greps carried. They needed a
-`^[^#]*` prefix so the guard's own comments describing the rules did not trip it
-(that bit on a one-repo pilot). A parser reads values, so prose about a
-rule cannot be mistaken for the rule.
+PyYAML is required and deliberately NOT installed at CI time: this script gates
+merges, so fetching an unpinned package from PyPI here would put an
+arbitrary-at-install-time dependency in the gating path. It ships in GitHub's ubuntu
+images. A runner without it is a runner-image problem and should be loud. Note that
+`actions/setup-python` installs a CLEAN interpreter from the tool cache which does
+NOT carry PyYAML -- do not add that step to this job.
 
 Exit codes: 0 clean, 1 a hard violation, 2 the checker could not run.
+
+SCOPE, stated so a pass is not mistaken for more than it is: this scans
+.github/workflows/*.yml|*.yaml, and follows a local `./` ref into its
+action.yml/action.yaml to check the refs inside a composite action. It does not
+resolve a reusable workflow in another repository, and pinning is checked by SHAPE
+-- see TRUSTED_THIRD_PARTY_ACTIONS below for the stricter mode.
 """
 
+import os
 import re
 import sys
 from pathlib import Path
@@ -31,18 +40,14 @@ from pathlib import Path
 try:
     import yaml
 except ImportError:
-    # Same policy as assert_gate_coverage.py: fail legibly rather than installing
-    # PyYAML at CI time. This gates merges, so an arbitrary-at-install-time
-    # dependency must not enter the gating path.
-    #
-    # sys.exit(2), not sys.exit(<str>): the string form prints to stderr and exits 1,
-    # which is the code this module documents for a real violation. Both fail the step,
-    # but a consumer branching on 2 ("infra problem, retry") versus 1 ("violation, do
-    # not retry") would misclassify a missing interpreter dependency as a bad workflow.
+    # Exit 2, not 1. `sys.exit("message")` prints the message and exits ONE, which this
+    # script reserves for a hard workflow violation -- so a runner image missing PyYAML
+    # reported as though the workflows themselves were bad, sending whoever read the
+    # check into the diff instead of the runner. main() already returns 2 for its other
+    # two "could not run" conditions; this is the third.
     print(
-        "PyYAML is not available to this runner. Install it in the image rather "
-        "than at gate time, or restore '.github/workflows/**' to the review "
-        "policy's high tier so a reviewer sees these diffs.",
+        "python3 cannot import yaml. Provide PyYAML in the runner image rather than "
+        "installing it at CI time -- this script gates merges.",
         file=sys.stderr,
     )
     sys.exit(2)
@@ -50,6 +55,50 @@ except ImportError:
 WORKFLOWS = Path(".github/workflows")
 SHA_LEN = 40
 DIGEST_LEN = 64
+
+# Triggers that run in the base repo's privileged context. Both have legitimate uses;
+# none should land without being argued for, so they are refused here rather than
+# reviewed by glob.
+PRIVILEGED_TRIGGERS = ("pull_request_target", "workflow_run")
+
+# OPTIONAL NO-CHECKOUT EXEMPTION, off unless the environment sets it.
+#
+# A workflow that never checks out or executes PR/head code is not the attack shape
+# PRIVILEGED_TRIGGERS refuses -- pull_request_target is dangerous specifically because it
+# combines a write token with attacker-controlled code, and a workflow that only reads the
+# API against the base ref (label operations, a status comment) never does that. Setting
+# PRIVILEGED_TRIGGER_NO_CHECKOUT to a space- or comma-separated list of workflow FILENAMES
+# (matched by name, e.g. "review-tier.yml") exempts those files' PRIVILEGED_TRIGGERS use --
+# but the exemption is enforced, not merely granted: any exempted workflow that also uses
+# `actions/checkout` fails regardless, because that combination is exactly the dangerous
+# shape again.
+#
+# Deliberately opt-in and file-scoped rather than a blanket disable, so a new workflow
+# cannot inherit the exemption by accident, and the CI-guard copy of this script can still
+# stay byte-identical to the shipped asset -- the repo-specific exemption list lives in the
+# WORKFLOW that sets the environment variable, never hardcoded in this file.
+PRIVILEGED_TRIGGER_NO_CHECKOUT = frozenset(
+    entry
+    for entry in os.environ.get("PRIVILEGED_TRIGGER_NO_CHECKOUT", "").replace(",", " ").split()
+    if entry
+)
+
+# OPTIONAL STRICTER MODE, off unless the environment sets it.
+#
+# The pin check validates the SHAPE of a ref, not that the owner is trusted or that
+# the revision is immutable in fact -- a 40-hex branch name passes. Setting
+# TRUSTED_THIRD_PARTY_ACTIONS to a space- or comma-separated list of `owner/repo`
+# entries additionally requires every third-party action to be named there, so a new
+# third-party dependency cannot appear without an explicit edit.
+#
+# Deliberately opt-in. Defaulting it on with a short list would fail any repo using a
+# third-party action not in it, which across this estate is most of them; a gate that
+# reddens on adoption gets reverted rather than fixed.
+TRUSTED_THIRD_PARTY_ACTIONS = frozenset(
+    entry
+    for entry in os.environ.get("TRUSTED_THIRD_PARTY_ACTIONS", "").replace(",", " ").split()
+    if entry
+)
 
 
 def load(path):
@@ -60,11 +109,22 @@ def load(path):
 def triggers(document):
     """The event names in `on:`, whatever spelling was used.
 
-    YAML 1.1 reads a bare `on` as the boolean True, which is why the key is
-    looked up both ways -- `document["on"]` alone silently finds nothing in every
-    workflow that writes the key unquoted, i.e. all of them.
+    YAML 1.1 reads a bare `on` as the boolean True, so the key must be looked up both
+    ways -- `document["on"]` alone silently finds nothing in every workflow that
+    writes the key unquoted, i.e. all of them. Both keys present at once is a
+    duplicate-key document whose resolution depends on the parser; that is refused
+    outright rather than guessed at.
     """
-    section = document.get("on", document.get(True))
+    sections = [value for key in ("on", True) if (value := document.get(key)) is not None]
+    if len(sections) > 1:
+        raise ValueError(
+            'both `on:` and a YAML-1.1 boolean `True:` key are present. Which one '
+            "GitHub honours depends on the parser, so one of them could carry a "
+            "trigger this check never sees. Use exactly one."
+        )
+    if not sections:
+        return []
+    section = sections[0]
     if isinstance(section, str):
         return [section]
     if isinstance(section, list):
@@ -75,20 +135,7 @@ def triggers(document):
 
 
 def permission_blocks(document):
-    """Every `permissions:` value in the file: workflow level, then each job.
-
-    KNOWN GAP, stated so this is not mistaken for full coverage: only the literal
-    `write-all` scalar is flagged (see main()). A mapping that grants every scope
-    `write` individually carries the same privilege and passes. Not closed here because
-    the test cannot be written soundly -- "every scope is write" needs the complete set
-    of scopes GitHub defines, which changes as GitHub adds them, and an omitted scope is
-    a *narrower* grant, not a broader one. A heuristic on scope count would fail
-    workflows that legitimately need three or four write scopes.
-
-    This is the same scope as the grep it replaces, so it is not a regression; the
-    bypass this file closes is the block-style spelling of `write-all`, not the
-    enumerated equivalent.
-    """
+    """(scope, value) for the workflow-level and every job-level `permissions:`."""
     blocks = []
     if "permissions" in document:
         blocks.append(("workflow", document["permissions"]))
@@ -101,7 +148,12 @@ def permission_blocks(document):
 
 
 def action_refs(document):
-    """Every `uses:` value in the file, with the job it came from."""
+    """Every ref that causes code to run: `uses:` values and container images.
+
+    A `container:` or `services:` image runs arbitrary code in the runner's context
+    exactly as an action does, so images are pin-checked alongside `uses:` refs. A
+    reusable-workflow call carries `uses:` on the JOB rather than on a step.
+    """
     refs = []
     jobs = document.get("jobs")
     if not isinstance(jobs, dict):
@@ -109,7 +161,6 @@ def action_refs(document):
     for name, job in jobs.items():
         if not isinstance(job, dict):
             continue
-        # A reusable-workflow call carries `uses:` on the job itself.
         if isinstance(job.get("uses"), str):
             refs.append((name, job["uses"]))
         steps = job.get("steps")
@@ -117,28 +168,33 @@ def action_refs(document):
             for step in steps:
                 if isinstance(step, dict) and isinstance(step.get("uses"), str):
                     refs.append((name, step["uses"]))
+        container = job.get("container")
+        if isinstance(container, str):
+            refs.append((name, container))
+        elif isinstance(container, dict) and isinstance(container.get("image"), str):
+            refs.append((name, container["image"]))
+        services = job.get("services")
+        if isinstance(services, dict):
+            for service in services.values():
+                if isinstance(service, str):
+                    # Shorthand: `services: { db: postgres }` names the image
+                    # directly, with no mapping and no `image:` key.
+                    refs.append((name, service))
+                elif isinstance(service, dict) and isinstance(service.get("image"), str):
+                    refs.append((name, service["image"]))
     return refs
-
-
-# Workflows permitted the target-context trigger under the written-rationale
-# exemption in main(): each never checks out or executes PR code (API reads
-# against the base ref only; writes are label operations). The gate fails any
-# exempted workflow that uses actions/checkout.
-TARGET_TRIGGER_NO_CHECKOUT = ("review-tier.yml",)
 
 
 def is_pinned(ref):
     """True when the ref names an immutable revision.
 
-    Both forms the estate actually uses are accepted. The previous `sed`-based
-    scanner kept surrounding quotes in the extracted value, so a correctly pinned
-    `uses: "actions/checkout@<40-hex>"` failed the hex test and was reported as an
-    unpinned third-party action; and a digest-pinned `docker://` ref could never
-    pass it at all. Parsed values carry no quotes, and the digest form is now
-    recognised explicitly.
+    Every form the estate uses is accepted. A sed-based scanner previously kept the
+    surrounding quotes in the extracted value, so a correctly pinned
+    `uses: "actions/checkout@<40-hex>"` failed the hex test and was reported unpinned;
+    parsed values carry no quotes.
     """
     if ref.startswith("./"):
-        return True  # A local action is this repository's own reviewed code.
+        return True  # Local: its manifest's own refs are validated separately.
     if "@" not in ref:
         return False
     revision = ref.rsplit("@", 1)[1]
@@ -147,7 +203,123 @@ def is_pinned(ref):
         return algorithm == "sha256" and len(digest) == DIGEST_LEN and all(
             char in "0123456789abcdef" for char in digest
         )
+    if revision.startswith("sha256:"):
+        # A bare container image pins by digest without the docker:// prefix.
+        digest = revision.partition(":")[2]
+        return len(digest) == DIGEST_LEN and all(char in "0123456789abcdef" for char in digest)
     return len(revision) == SHA_LEN and all(char in "0123456789abcdef" for char in revision)
+
+
+def is_reusable_workflow_ref(ref):
+    """True when a local `./` ref calls a reusable workflow rather than an action.
+
+    GitHub draws this by shape: a reusable-workflow call names a YAML FILE, an action
+    names a DIRECTORY containing action.yml. `action_refs` deliberately collects
+    job-level `uses:` for pin checking, so the manifest lookup downstream has to tell
+    the two apart or it demands action.yml from a reusable workflow that never has one.
+    """
+    return ref.lower().endswith((".yml", ".yaml"))
+
+
+def local_manifest(ref):
+    """Path to the action manifest for a local `./` ref, or None when not found.
+
+    A local `uses:` names a directory holding `action.yml`/`action.yaml`; the ref is
+    repo-root-relative because workflows run with the checkout as working directory.
+    """
+    for name in ("action.yml", "action.yaml"):
+        candidate = Path(ref) / name
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def composite_step_refs(document):
+    """`uses:` refs inside a composite action's `runs.steps`.
+
+    Only composite actions have shell-style steps; node and docker actions carry no
+    `uses:` of their own and contribute nothing here.
+    """
+    refs = []
+    runs = document.get("runs")
+    if isinstance(runs, dict) and runs.get("using") == "composite":
+        steps = runs.get("steps")
+        if isinstance(steps, list):
+            for step in steps:
+                if isinstance(step, dict) and isinstance(step.get("uses"), str):
+                    refs.append(step["uses"])
+    return refs
+
+
+def check_ref(job, ref, origin, unpinned):
+    """One pin check, shared by workflow refs and composite-action refs.
+
+    Returns (failed, unpinned), with `unpinned` incremented for a first-party notice.
+    """
+    owner = ref.split("@", 1)[0]
+    third_party = not ref.startswith(("actions/", "./", "docker://"))
+
+    # The allowlist names ACTIONS by `owner/repo`, so it must only gate action refs.
+    # `action_refs` also yields container and service IMAGES, which reach here as bare
+    # names (`postgres@sha256:...`, `mcr.microsoft.com/mssql/server:2022-latest`) and
+    # therefore satisfy `third_party` too. Because the allowlist test runs BEFORE
+    # is_pinned, a correctly digest-pinned image was rejected for not appearing in an
+    # allowlist it could never legitimately be in.
+    #
+    # Three tells, and the DIGEST is the load-bearing one. A registry host (dot in the
+    # first segment) and a port or tag colon both catch `mcr.microsoft.com/...`, but
+    # neither catches a Docker Hub org image like `bitnami/postgresql@sha256:...` --
+    # no dot, no colon, and `bitnami/postgresql` is exactly action-shaped. Only images
+    # pin with an `@sha256:` digest; an action pins to a bare 40-hex commit. So the
+    # digest settles the cases the other two miss.
+    revision = ref.split("@", 1)[1] if "@" in ref else ""
+    action_shaped = (
+        not revision.startswith("sha256:")
+        and "/" in owner
+        and "." not in owner.split("/", 1)[0]
+        and ":" not in owner
+    )
+
+    if (
+        TRUSTED_THIRD_PARTY_ACTIONS
+        and third_party
+        and action_shaped
+        and owner not in TRUSTED_THIRD_PARTY_ACTIONS
+    ):
+        print(
+            f"::error file={origin}::Third-party action '{ref}' ({job}) is not in "
+            "TRUSTED_THIRD_PARTY_ACTIONS. Add it there with a written rationale, or "
+            "use an action already trusted by this repository."
+        )
+        return True, unpinned
+
+    if is_pinned(ref):
+        return False, unpinned
+
+    # actions/* is GitHub's own namespace, and the house standard is the INVERSE of
+    # the third-party rule: first-party actions take the major tag, and audit-ci
+    # grades a SHA-pinned first-party action as drift. "Take the major tag" is
+    # enforced here, not assumed -- a branch ref (actions/checkout@main) or a bare
+    # action name is just as mutable as an unpinned third-party tag and can change
+    # after review.
+    if ref.startswith("actions/"):
+        revision = ref.rsplit("@", 1)[1] if "@" in ref else ""
+        if re.fullmatch(r"v\d+(\.\d+)*", revision):
+            # Conformant -- a vN release tag (major or dotted minor/patch). Counted
+            # only so the summary shows the split.
+            return False, unpinned + 1
+        print(
+            f"::error file={origin}::First-party action '{ref}' ({job}) is not on "
+            "the vN major tag. A branch ref or a bare action name is mutable and can "
+            "change after review."
+        )
+        return True, unpinned
+
+    print(
+        f"::error file={origin}::Third-party action or image '{ref}' ({job}) is not "
+        "pinned to an immutable revision. A mutable tag can change after review."
+    )
+    return True, unpinned
 
 
 def main():
@@ -157,8 +329,14 @@ def main():
 
     failed = False
     first_party_tag = 0
+    scanned = 0
 
-    for path in sorted(list(WORKFLOWS.glob("*.yml")) + list(WORKFLOWS.glob("*.yaml"))):
+    paths = sorted(
+        path
+        for pattern in ("*.yml", "*.yaml")
+        for path in WORKFLOWS.glob(pattern)
+    )
+    for path in paths:
         try:
             document = load(path)
         except yaml.YAMLError as error:
@@ -166,88 +344,142 @@ def main():
             failed = True
             continue
         if not isinstance(document, dict):
-            print(f"::error file={path}::Workflow does not parse to a mapping.")
+            print(f"::error file={path}::Top level is not a mapping; not a workflow.")
             failed = True
             continue
 
-        for event in triggers(document):
-            # This trigger runs with a write token and repository secrets in the
-            # base repo's context, while able to check out attacker-controlled head
-            # code. It has legitimate uses; none should land without being argued
-            # for, so it is refused here rather than reviewed by glob.
-            #
-            # Written-rationale exemption: the workflows named in
-            # TARGET_TRIGGER_NO_CHECKOUT are permitted the trigger ONLY because they
-            # never check out or execute PR code — every read is an API call against
-            # the base ref, and the only writes are label operations. The exemption
-            # is enforced below: any actions/checkout use in an exempted workflow
-            # fails the gate. Add a workflow to the tuple only with the same
-            # no-checkout property argued in its own header comment.
-            if event == "pull_request_target":
-                if path.name in TARGET_TRIGGER_NO_CHECKOUT:
-                    # Enforced on the PARSED document, not raw text — a comment or a
-                    # string literal mentioning the action must not trip it, and a
-                    # `uses:` under any job must.
-                    if any(ref.split("@", 1)[0] == "actions/checkout" for _, ref in action_refs(document)):
-                        print(
-                            f"::error file={path}::Exempted from the target-context trigger ban on "
-                            "the written rationale that it never checks out PR code, but it uses "
-                            "actions/checkout. Remove the checkout or the exemption."
-                        )
-                        failed = True
+        scanned += 1
+
+        try:
+            events = triggers(document)
+        except ValueError as error:
+            print(f"::error file={path}::{error}")
+            failed = True
+            events = []
+
+        exempted = path.name in PRIVILEGED_TRIGGER_NO_CHECKOUT
+        uses_checkout = any(
+            ref.split("@", 1)[0] == "actions/checkout" for _, ref in action_refs(document)
+        )
+        for event in events:
+            if event in PRIVILEGED_TRIGGERS:
+                if exempted and not uses_checkout:
+                    print(
+                        f"::notice file={path}::Target-context trigger exempted via "
+                        "PRIVILEGED_TRIGGER_NO_CHECKOUT -- this workflow never checks out "
+                        "head code."
+                    )
+                    continue
+                if exempted and uses_checkout:
+                    print(
+                        f"::error file={path}::This workflow is named in "
+                        "PRIVILEGED_TRIGGER_NO_CHECKOUT but also uses actions/checkout -- "
+                        "that combination is exactly the dangerous shape the exemption "
+                        "requires absence of. Remove the checkout, or remove the exemption "
+                        "and restructure onto plain pull_request."
+                    )
+                    failed = True
                     continue
                 print(
-                    f"::error file={path}::This workflow uses the target-context trigger, which grants "
-                    "a write token and repository secrets to a workflow that can check out untrusted "
-                    "head code. Use the plain pull_request trigger, or remove this assertion "
-                    "deliberately with a written rationale."
+                    f"::error file={path}::This workflow uses a target-context trigger "
+                    "(see the refused event list in this script), which runs in the base "
+                    "repository's context with its secrets and a write-scoped token while "
+                    "able to reach untrusted head code. Restructure so untrusted code runs "
+                    "under the plain pull_request trigger, or name this file in "
+                    "PRIVILEGED_TRIGGER_NO_CHECKOUT if it genuinely never checks out head "
+                    "code, with a written rationale in the workflow itself."
                 )
                 failed = True
 
+        # A workflow omitting `permissions:` inherits the org/repo default token, which
+        # this script cannot see and which may be broader than anything the write-all
+        # check would catch. Not a failure: the default is an org setting, not a diff
+        # property. Surfaced so the omission is a decision rather than an oversight.
+        if "permissions" not in document:
+            print(
+                f"::notice file={path}::No workflow-level `permissions:` key; the job token "
+                "inherits the org/repo default. Set it explicitly, if only to `contents: read`."
+            )
+
         for scope, value in permission_blocks(document):
+            # YAML accepts a quoted or bare `write-all` identically; a parsed value
+            # carries no quotes either way, which is why this is a comparison and not
+            # a pattern.
             if isinstance(value, str) and value.strip() == "write-all":
                 print(
-                    f"::error file={path}::A write-all token at {scope} scope discards least "
+                    f"::error file={path}::A write-all token ({scope}) discards least "
                     "privilege. Declare the specific permissions each job needs."
                 )
                 failed = True
 
         for job, ref in action_refs(document):
-            if is_pinned(ref):
+            bad, first_party_tag = check_ref(job, ref, path, first_party_tag)
+            failed = failed or bad
+
+            if not ref.startswith("./"):
                 continue
-            # actions/* is GitHub's own namespace, and the house standard is the
-            # INVERSE of the third-party rule: first-party actions take the major
-            # tag, and audit-ci grades a SHA-pinned first-party action as drift.
-            # "Take the major tag" is enforced here, not assumed: a branch ref
-            # (actions/checkout@main) or a bare action name is just as mutable as
-            # an unpinned third-party tag and can move after review.
-            if ref.startswith("actions/"):
-                revision = ref.rsplit("@", 1)[1] if "@" in ref else ""
-                if re.fullmatch(r"v\d+(\.\d+)*", revision):
-                    # Conformant -- a vN release tag (major or dotted minor/patch).
-                    # Counted only so the summary shows the split.
-                    first_party_tag += 1
-                else:
+            # A local `./` ref is one of two different things, and only one of them has
+            # an action manifest. A reusable WORKFLOW call names a FILE
+            # (`./.github/workflows/_deploy.yml`); a composite ACTION names a DIRECTORY
+            # holding action.yml. Demanding a manifest from the first is a false
+            # failure -- and because `Review policy intact` is a required check, it
+            # makes every repo using a reusable deploy workflow unmergeable. The
+            # extension is the distinction GitHub itself draws, so it is what we test.
+            if is_reusable_workflow_ref(ref):
+                if not Path(ref).is_file():
                     print(
-                        f"::error file={path}::First-party action '{ref}' (job '{job}') is not on "
-                        "the vN major tag. A branch ref or a bare action name is mutable and can "
-                        "change after review."
+                        f"::error file={path}::Reusable workflow '{ref}' ({job}) does not "
+                        "exist. The ref cannot resolve at run time."
                     )
                     failed = True
-            else:
+                continue
+            manifest = local_manifest(ref)
+            if manifest is None:
                 print(
-                    f"::error file={path}::Third-party action '{ref}' (job '{job}') is not pinned to "
-                    "an immutable revision. A mutable tag can change after review."
+                    f"::error file={path}::Local action '{ref}' ({job}) has no "
+                    "action.yml/action.yaml. The ref cannot resolve at run time."
                 )
                 failed = True
+                continue
+            try:
+                inner = load(manifest)
+            except yaml.YAMLError as error:
+                print(f"::error file={manifest}::Not parseable as YAML: {error}")
+                failed = True
+                continue
+            if not isinstance(inner, dict):
+                continue
+            # A local composite action is this repository's own reviewed code, but the
+            # actions IT calls are not -- and they are invisible to a scan that stops
+            # at .github/workflows.
+            for inner_ref in composite_step_refs(inner):
+                bad, first_party_tag = check_ref(
+                    f"{job} -> {ref}", inner_ref, manifest, first_party_tag
+                )
+                failed = failed or bad
 
     if failed:
         return 1
 
+    if not scanned:
+        print(f"::error::No workflow files found under {WORKFLOWS}; nothing was asserted.")
+        return 2
+
+    mode = (
+        f", third-party allowlist enforced ({len(TRUSTED_THIRD_PARTY_ACTIONS)} entries)"
+        if TRUSTED_THIRD_PARTY_ACTIONS
+        else ""
+    )
+    mode += (
+        f", {len(PRIVILEGED_TRIGGER_NO_CHECKOUT)} workflow(s) exempted from the "
+        "target-context trigger refusal"
+        if PRIVILEGED_TRIGGER_NO_CHECKOUT
+        else ""
+    )
     print(
-        "Workflow hygiene: no unexempted target-context trigger, no write-all token, "
-        "every third-party action pinned "
-        f"({first_party_tag} first-party ref(s) on a vN release tag, conformant)."
+        f"Workflow hygiene: {scanned} workflow(s) scanned -- no target-context trigger, "
+        f"no write-all token, every third-party action and container image pinned "
+        f"({first_party_tag} first-party ref(s) on a vN release tag, conformant){mode}."
     )
     return 0
 

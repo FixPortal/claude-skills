@@ -33,6 +33,7 @@ resolve a reusable workflow in another repository, and pinning is checked by SHA
 """
 
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -60,13 +61,27 @@ DIGEST_LEN = 64
 # reviewed by glob.
 PRIVILEGED_TRIGGERS = ("pull_request_target", "workflow_run")
 
-# Workflows permitted the pull_request_target trigger under a written-rationale
-# exemption: each named workflow never checks out or executes PR code -- every read
-# is an API call against the base ref, and the only writes are label operations. The
-# exemption is enforced in main(): any actions/checkout use in an exempted workflow
-# fails the gate regardless. Add a workflow to this tuple only with the same
-# no-checkout property argued in its own header comment.
-TARGET_TRIGGER_NO_CHECKOUT = ("review-tier.yml",)
+# OPTIONAL NO-CHECKOUT EXEMPTION, off unless the environment sets it.
+#
+# A workflow that never checks out or executes PR/head code is not the attack shape
+# PRIVILEGED_TRIGGERS refuses -- pull_request_target is dangerous specifically because it
+# combines a write token with attacker-controlled code, and a workflow that only reads the
+# API against the base ref (label operations, a status comment) never does that. Setting
+# PRIVILEGED_TRIGGER_NO_CHECKOUT to a space- or comma-separated list of workflow FILENAMES
+# (matched by name, e.g. "review-tier.yml") exempts those files' PRIVILEGED_TRIGGERS use --
+# but the exemption is enforced, not merely granted: any exempted workflow that also uses
+# `actions/checkout` fails regardless, because that combination is exactly the dangerous
+# shape again.
+#
+# Deliberately opt-in and file-scoped rather than a blanket disable, so a new workflow
+# cannot inherit the exemption by accident, and the CI-guard copy of this script can still
+# stay byte-identical to the shipped asset -- the repo-specific exemption list lives in the
+# WORKFLOW that sets the environment variable, never hardcoded in this file.
+PRIVILEGED_TRIGGER_NO_CHECKOUT = frozenset(
+    entry
+    for entry in os.environ.get("PRIVILEGED_TRIGGER_NO_CHECKOUT", "").replace(",", " ").split()
+    if entry
+)
 
 # OPTIONAL STRICTER MODE, off unless the environment sets it.
 #
@@ -281,18 +296,24 @@ def check_ref(job, ref, origin, unpinned):
     if is_pinned(ref):
         return False, unpinned
 
-    # actions/* is GitHub's own namespace, and a mutable tag there means trusting
-    # GitHub -- which every workflow already does by running on their runners. A
-    # third-party mutable tag means trusting that owner forever, with no re-review
-    # when they move it. Only the second is gated. Measured 2026-08-19 across 28
-    # estate repos: 319 unpinned refs, every one sampled `actions/*` -- a hard gate on
-    # all owners would have failed 27 of 28 repos on their next PR.
+    # actions/* is GitHub's own namespace, and the house standard is the INVERSE of
+    # the third-party rule: first-party actions take the major tag, and audit-ci
+    # grades a SHA-pinned first-party action as drift. "Take the major tag" is
+    # enforced here, not assumed -- a branch ref (actions/checkout@main) or a bare
+    # action name is just as mutable as an unpinned third-party tag and can change
+    # after review.
     if ref.startswith("actions/"):
+        revision = ref.rsplit("@", 1)[1] if "@" in ref else ""
+        if re.fullmatch(r"v\d+(\.\d+)*", revision):
+            # Conformant -- a vN release tag (major or dotted minor/patch). Counted
+            # only so the summary shows the split.
+            return False, unpinned + 1
         print(
-            f"::notice file={origin}::'{ref}' ({job}) is not SHA-pinned. First-party "
-            "(GitHub) action, so not failed -- pin it when convenient."
+            f"::error file={origin}::First-party action '{ref}' ({job}) is not on "
+            "the vN major tag. A branch ref or a bare action name is mutable and can "
+            "change after review."
         )
-        return False, unpinned + 1
+        return True, unpinned
 
     print(
         f"::error file={origin}::Third-party action or image '{ref}' ({job}) is not "
@@ -307,7 +328,7 @@ def main():
         return 2
 
     failed = False
-    unpinned_first_party = 0
+    first_party_tag = 0
     scanned = 0
 
     paths = sorted(
@@ -336,29 +357,37 @@ def main():
             failed = True
             events = []
 
+        exempted = path.name in PRIVILEGED_TRIGGER_NO_CHECKOUT
+        uses_checkout = any(
+            ref.split("@", 1)[0] == "actions/checkout" for _, ref in action_refs(document)
+        )
         for event in events:
-            if event == "pull_request_target" and path.name in TARGET_TRIGGER_NO_CHECKOUT:
-                # Enforced on the PARSED document, not raw text -- a comment or a
-                # string literal mentioning the action must not trip it, and a
-                # `uses:` under any job must.
-                if any(
-                    ref.split("@", 1)[0] == "actions/checkout" for _, ref in action_refs(document)
-                ):
+            if event in PRIVILEGED_TRIGGERS:
+                if exempted and not uses_checkout:
                     print(
-                        f"::error file={path}::Exempted from the target-context trigger ban on "
-                        "the written rationale that it never checks out PR code, but it uses "
-                        "actions/checkout. Remove the checkout or the exemption."
+                        f"::notice file={path}::Target-context trigger exempted via "
+                        "PRIVILEGED_TRIGGER_NO_CHECKOUT -- this workflow never checks out "
+                        "head code."
+                    )
+                    continue
+                if exempted and uses_checkout:
+                    print(
+                        f"::error file={path}::This workflow is named in "
+                        "PRIVILEGED_TRIGGER_NO_CHECKOUT but also uses actions/checkout -- "
+                        "that combination is exactly the dangerous shape the exemption "
+                        "requires absence of. Remove the checkout, or remove the exemption "
+                        "and restructure onto plain pull_request."
                     )
                     failed = True
-                continue
-            if event in PRIVILEGED_TRIGGERS:
+                    continue
                 print(
                     f"::error file={path}::This workflow uses a target-context trigger "
                     "(see the refused event list in this script), which runs in the base "
                     "repository's context with its secrets and a write-scoped token while "
                     "able to reach untrusted head code. Restructure so untrusted code runs "
-                    "under the plain pull_request trigger, or remove this assertion "
-                    "deliberately with a written rationale."
+                    "under the plain pull_request trigger, or name this file in "
+                    "PRIVILEGED_TRIGGER_NO_CHECKOUT if it genuinely never checks out head "
+                    "code, with a written rationale in the workflow itself."
                 )
                 failed = True
 
@@ -384,7 +413,7 @@ def main():
                 failed = True
 
         for job, ref in action_refs(document):
-            bad, unpinned_first_party = check_ref(job, ref, path, unpinned_first_party)
+            bad, first_party_tag = check_ref(job, ref, path, first_party_tag)
             failed = failed or bad
 
             if not ref.startswith("./"):
@@ -424,8 +453,8 @@ def main():
             # actions IT calls are not -- and they are invisible to a scan that stops
             # at .github/workflows.
             for inner_ref in composite_step_refs(inner):
-                bad, unpinned_first_party = check_ref(
-                    f"{job} -> {ref}", inner_ref, manifest, unpinned_first_party
+                bad, first_party_tag = check_ref(
+                    f"{job} -> {ref}", inner_ref, manifest, first_party_tag
                 )
                 failed = failed or bad
 
@@ -441,10 +470,16 @@ def main():
         if TRUSTED_THIRD_PARTY_ACTIONS
         else ""
     )
+    mode += (
+        f", {len(PRIVILEGED_TRIGGER_NO_CHECKOUT)} workflow(s) exempted from the "
+        "target-context trigger refusal"
+        if PRIVILEGED_TRIGGER_NO_CHECKOUT
+        else ""
+    )
     print(
         f"Workflow hygiene: {scanned} workflow(s) scanned -- no target-context trigger, "
         f"no write-all token, every third-party action and container image pinned "
-        f"({unpinned_first_party} first-party ref(s) unpinned, not gated){mode}."
+        f"({first_party_tag} first-party ref(s) on a vN release tag, conformant){mode}."
     )
     return 0
 
