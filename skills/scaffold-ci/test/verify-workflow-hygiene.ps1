@@ -180,6 +180,37 @@ jobs:
         throw "an exempted workflow that ALSO checks out code must still fail - that is exactly the dangerous shape:`n$($exemptButCheckout.Output)"
     }
 
+    # A workflow that never calls actions/checkout ITSELF but delegates to a local
+    # composite action that does is exactly as dangerous, and a check of only the
+    # workflow's own uses: refs misses it entirely.
+    $env:PRIVILEGED_TRIGGER_NO_CHECKOUT = 'ci.yml'
+    $exemptViaComposite = Invoke-Hygiene @{
+        '.github/workflows/ci.yml' = @'
+on:
+  pull_request_target:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/setup
+'@
+        '.github/actions/setup/action.yml' = @'
+name: setup
+runs:
+  using: composite
+  steps:
+    - uses: actions/checkout@v7
+      shell: bash
+'@
+    }
+    $env:PRIVILEGED_TRIGGER_NO_CHECKOUT = $oldExempt
+    if ($exemptViaComposite.Code -ne 1 -or $exemptViaComposite.Output -notmatch 'also uses actions/checkout') {
+        throw "an exempted workflow that checks out code THROUGH a local composite action must still fail:`n$($exemptViaComposite.Output)"
+    }
+
     # --- Duplicate `on:` / YAML-1.1 `True:` key. Which one GitHub honours depends on the
     #     parser, so a trigger could hide in the one this check does not read.
     $dupKey = Invoke-Hygiene @{ '.github/workflows/ci.yml' = @'
@@ -351,6 +382,28 @@ jobs:
     $allowlistPass = Invoke-Hygiene @{ '.github/workflows/ci.yml' = $clean }
     $env:TRUSTED_THIRD_PARTY_ACTIONS = ''
     if ($allowlistPass.Code -ne 0) { throw "a listed, pinned third-party action must pass:`n$($allowlistPass.Output)" }
+
+    # An action in a SUBDIRECTORY of an already-trusted repo (owner/repo/subdir/action)
+    # must match on owner/repo, not on the full path -- the allowlist names repositories.
+    $subdirClean = @"
+name: ci
+on:
+  pull_request:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: raven-actions/actionlint/cmd/actionlint@$SHA
+"@
+    $env:TRUSTED_THIRD_PARTY_ACTIONS = 'raven-actions/actionlint'
+    $subdirAllowlisted = Invoke-Hygiene @{ '.github/workflows/ci.yml' = $subdirClean }
+    $env:TRUSTED_THIRD_PARTY_ACTIONS = ''
+    if ($subdirAllowlisted.Code -ne 0) {
+        throw "a subdirectory action from an already-trusted owner/repo must match the allowlist entry:`n$($subdirAllowlisted.Output)"
+    }
 
     # --- The checker must refuse to report a pass it cannot stand behind.
     $noWorkflows = Invoke-Hygiene @{}

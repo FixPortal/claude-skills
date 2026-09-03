@@ -297,8 +297,140 @@ jobs:
     steps:
       - run: echo "all good"
 '@
-    if ($noAggregation.Code -eq 0 -or $noAggregation.Output -notmatch 'has no step conditioned on a') {
+    if ($noAggregation.Code -eq 0 -or $noAggregation.Output -notmatch 'has no step whose `if:` references a') {
         throw "a gate that aggregates nothing must fail:`n$($noAggregation.Output)"
+    }
+
+    # THE DIAGNOSTIC ECHO MUST NOT SATISFY THE AGGREGATION CHECK. The house skeleton ships
+    # `echo "Upstream results: ${{ join(needs.*.result, ', ') }}"` in the SAME step as the
+    # gating `if:`. While this assertion searched the whole job block, deleting the `if:` --
+    # so the step runs unconditionally and never fails -- still passed, because the echo
+    # matched. That is exactly the "guts only the aggregation step" neuter the checker
+    # exists to catch, so it was blind to its own subject. Found by Gitar on
+    # fixportal-initiator#225.
+    $echoOnly = Invoke-Gate @'
+jobs:
+  build:
+    runs-on: ubuntu-latest
+  ci-gate:
+    if: always()
+    needs: [build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fail if any upstream job did not succeed
+        run: |
+          echo "Upstream results: ${{ join(needs.*.result, ', ') }}"
+'@
+    if ($echoOnly.Code -eq 0 -or $echoOnly.Output -notmatch 'has no step whose `if:` references a') {
+        throw "a needs.*.result in a run: body must not satisfy the aggregation check:`n$($echoOnly.Output)"
+    }
+
+    # The real shape -- gating condition AND diagnostic echo together -- must still pass,
+    # or the tightening would red every gate the scaffold ships.
+    $conditionAndEcho = Invoke-Gate @'
+jobs:
+  build:
+    runs-on: ubuntu-latest
+  ci-gate:
+    if: always()
+    needs: [build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fail if any upstream job did not succeed
+        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+        run: |
+          echo "Upstream results: ${{ join(needs.*.result, ', ') }}"
+          exit 1
+'@
+    if ($conditionAndEcho.Code -ne 0) {
+        throw "the shipped gate shape (step if: plus diagnostic echo) must pass:`n$($conditionAndEcho.Output)"
+    }
+
+    # A BLOCK-SCALAR condition is still a condition. `if: >` carries its value on the
+    # following, more-indented lines; a checker that reads only the `if:` line itself sees
+    # an empty value and reports a spurious failure on correct configuration.
+    $blockScalarCondition = Invoke-Gate @'
+jobs:
+  build:
+    runs-on: ubuntu-latest
+  ci-gate:
+    if: always()
+    needs: [build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fail if any upstream job did not succeed
+        if: >
+          contains(needs.*.result, 'failure') ||
+          contains(needs.*.result, 'cancelled')
+        run: exit 1
+'@
+    if ($blockScalarCondition.Code -ne 0) {
+        throw "a block-scalar step condition must be read:`n$($blockScalarCondition.Output)"
+    }
+
+    # ...including the forms carrying an explicit INDENTATION INDICATOR. `>2`, `|2-` and
+    # `|-2` are all valid YAML headers; a header regex of only [|>][+-]? treats `>2` as an
+    # ordinary truthy value, never reads the continuation, and reds a correct gate.
+    $blockScalarIndented = Invoke-Gate @'
+jobs:
+  build:
+    runs-on: ubuntu-latest
+  ci-gate:
+    if: always()
+    needs: [build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fail if any upstream job did not succeed
+        if: >2
+          contains(needs.*.result, 'failure')
+        run: exit 1
+'@
+    if ($blockScalarIndented.Code -ne 0) {
+        throw "a block scalar with an indentation indicator must be read:`n$($blockScalarIndented.Output)"
+    }
+
+    # A folded condition on a DASH-form step must end at the `if:` key's column. Measuring
+    # the line instead put the bar at the dash, so the sibling `run:` and its whole body
+    # were absorbed into the condition -- and the gate's own diagnostic echo of
+    # `join(needs.*.result, ', ')` inside that body then satisfied the aggregation check
+    # for a step whose condition is literally `false`. Fail-open, reached by way of a fix
+    # for the dash form.
+    $dashFoldedFalsy = Invoke-Gate @'
+jobs:
+  build:
+    runs-on: ubuntu-latest
+  ci-gate:
+    if: always()
+    needs: [build]
+    runs-on: ubuntu-latest
+    steps:
+      - if: >-
+          false
+        run: |
+          echo "Upstream results: ${{ join(needs.*.result, ', ') }}"
+          exit 1
+'@
+    if ($dashFoldedFalsy.Code -eq 0 -or $dashFoldedFalsy.Output -notmatch 'has no step whose ') {
+        throw "a folded condition must not absorb the sibling run: body:`n$($dashFoldedFalsy.Output)"
+    }
+
+    # The same shape with a real condition still has to pass, or the rule above bought its
+    # strictness by reddening a correct gate.
+    $dashFolded = Invoke-Gate @'
+jobs:
+  build:
+    runs-on: ubuntu-latest
+  ci-gate:
+    if: always()
+    needs: [build]
+    runs-on: ubuntu-latest
+    steps:
+      - if: >-
+          contains(needs.*.result, 'failure')
+        run: exit 1
+'@
+    if ($dashFolded.Code -ne 0) {
+        throw "a folded condition on a dash-form step must be read:`n$($dashFolded.Output)"
     }
 
     # A comment naming the expression must not satisfy the aggregation check.
@@ -314,7 +446,7 @@ jobs:
       # this used to check needs.*.result
       - run: echo "all good"
 '@
-    if ($commentedAggregation.Code -eq 0 -or $commentedAggregation.Output -notmatch 'has no step conditioned on a') {
+    if ($commentedAggregation.Code -eq 0 -or $commentedAggregation.Output -notmatch 'has no step whose `if:` references a') {
         throw "a commented-out aggregation must not count as aggregation:`n$($commentedAggregation.Output)"
     }
 
@@ -351,6 +483,57 @@ jobs:
         throw "a quoted 'if' key and quoted always() value must pass:`n$($quotedAlways.Output)"
     }
 
+    # A `run:` BLOCK-SCALAR BODY containing text shaped like a real step `if:` line must
+    # not be mistaken for one. Here the gate's actual step-level `if:` has been deleted
+    # (the step runs unconditionally and never fails), but an earlier diagnostic step's
+    # `run: |` payload prints a line that LOOKS like `if: contains(needs.*.result, ...)`
+    # at step-body indentation. A checker that scans every line for the STEP_IF_VALUE
+    # shape, blind to whether it sits inside a preceding block scalar, reads that printed
+    # text as the real condition and reports the gate as aggregating -- fail-open on a
+    # gate that aggregates nothing. Found by CodeRabbit on fixportal-quickfixn#68.
+    $conditionInRunBody = Invoke-Gate @'
+jobs:
+  build:
+    runs-on: ubuntu-latest
+  ci-gate:
+    if: always()
+    needs: [build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Explain the gate shape
+        run: |
+          echo "This gate is wired like:"
+          echo "  if: contains(needs.*.result, 'failure')"
+      - name: Fail if any upstream job did not succeed
+        run: exit 1
+'@
+    if ($conditionInRunBody.Code -eq 0 -or $conditionInRunBody.Output -notmatch 'has no step whose `if:` references a') {
+        throw "if:-shaped text inside a preceding run: body must not count as a real step condition:`n$($conditionInRunBody.Output)"
+    }
+
+    # The same shape but with a GENUINE step-level `if:` after the look-alike run: body
+    # must still pass, or the fix above bought its strictness by reddening a correct gate.
+    $conditionAfterRunBody = Invoke-Gate @'
+jobs:
+  build:
+    runs-on: ubuntu-latest
+  ci-gate:
+    if: always()
+    needs: [build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Explain the gate shape
+        run: |
+          echo "This gate is wired like:"
+          echo "  if: contains(needs.*.result, 'failure')"
+      - name: Fail if any upstream job did not succeed
+        if: contains(needs.*.result, 'failure')
+        run: exit 1
+'@
+    if ($conditionAfterRunBody.Code -ne 0) {
+        throw "a real step if: after a look-alike run: body must still be read:`n$($conditionAfterRunBody.Output)"
+    }
+
     'assert_gate_coverage.py OK - quoted keys, sequence forms, fail-closed parsing, conditional feeders, and the gate''s own always()/aggregation semantics'
 }
 finally {
@@ -360,7 +543,3 @@ finally {
         Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
-
-# The fail-closed python child above is asserted, not fatal — clear its native status so
-# a caller that checks $LASTEXITCODE after a PASS does not read the child's failure.
-$global:LASTEXITCODE = 0
