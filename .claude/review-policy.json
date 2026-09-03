@@ -20,7 +20,9 @@
   ],
   "version": 1,
   "high": [
+    ".github/workflows/ci.yml",
     ".github/workflows/review-policy-guard.yml",
+    ".github/scripts/assert_gate_coverage.py",
     ".github/scripts/assert_workflow_hygiene.py",
     ".claude/review-policy.json",
     ".coderabbit.yaml",
