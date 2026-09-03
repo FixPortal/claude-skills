@@ -77,13 +77,13 @@ jobs:
             $high && break
           done <<< "$files"
 
-          labelled=$(gh pr view "$PR_NUMBER" --json labels --jq '.labels[].name' | grep -cx 'review-high' || true)
+          labelled=$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json labels --jq '.labels[].name' | grep -cx 'review-high' || true)
 
           if $high; then
             echo "HIGH tier: at least one changed path matches the policy's high list."
-            gh label create review-high --force --description "HIGH review tier: CodeRabbit review required" >/dev/null
+            gh label create review-high --repo "$GITHUB_REPOSITORY" --force --description "HIGH review tier: CodeRabbit review required" >/dev/null
             if [ "$labelled" -eq 0 ]; then
-              gh pr edit "$PR_NUMBER" --add-label review-high
+              gh pr edit "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --add-label review-high
               echo "Applied the review-high label."
             else
               echo "The review-high label is already present."
@@ -91,7 +91,7 @@ jobs:
           else
             echo "Not HIGH: no changed path matches the policy's high list."
             if [ "$labelled" -gt 0 ]; then
-              gh pr edit "$PR_NUMBER" --remove-label review-high
+              gh pr edit "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --remove-label review-high
               echo "Removed the review-high label."
             fi
           fi
