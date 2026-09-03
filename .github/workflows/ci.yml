@@ -37,6 +37,16 @@ jobs:
         with:
           shellcheck: true
 
+      # scaffold-frontend's verifiers resolve real package metadata through npm. The
+      # runner image ships npm 10, whose arborist dies with "Cannot read properties of
+      # null (reading 'edgesOut')" (npm/cli#9787) on their fixture's peer set --
+      # verify-version-floor.ps1 SKIPs on it by design and verify-template-contract.ps1
+      # fails outright, so the job has been red on an environment bug rather than on a
+      # contract breach. Both verifiers' comments already assume "CI pins npm 12";
+      # nothing ever did. This is that pin.
+      - name: Pin npm past the arborist peer-set crash
+        run: npm install -g npm@12
+
       - name: Run skill verification scripts
         shell: pwsh
         env:
