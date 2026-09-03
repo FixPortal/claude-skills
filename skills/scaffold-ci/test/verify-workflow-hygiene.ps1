@@ -96,7 +96,7 @@ jobs:
     steps:
       - uses: $badRef
 "@ }
-        if ($badFirstParty.Code -ne 1 -or $badFirstParty.Output -notmatch 'not on the vN major tag') {
+        if ($badFirstParty.Code -ne 1 -or $badFirstParty.Output -notmatch 'not on a vN release tag') {
             throw "a first-party ref not on a vN tag ('$badRef') must fail:`n$($badFirstParty.Output)"
         }
     }
